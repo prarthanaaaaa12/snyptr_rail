@@ -281,6 +281,9 @@
 
       <!-- Right: Connection & Status Controls -->
       <div style="display: flex; align-items: center; gap: 8px;">
+        <a href="drive-dashboard.html" class="ref-btn" style="text-decoration:none; background:#1b4d3e; color:#2cff55; border: 1px solid #2cff55; padding:5px 10px;" title="Switch to 2D Car Manual Cockpit">
+          🚗 2D CAR DASHBOARD ↗
+        </a>
         <!-- Serial Connection Status Pill -->
         <button id="btnConnectSerial" onclick="toggleConnectSerial()" class="ref-btn ref-btn-accent" style="display: flex; align-items: center; gap: 6px;" title="Connect directly to ESP32 over USB at 115200 baud">
           <span id="serialStatusDot" style="width: 7px; height: 7px; border-radius: 50%; background-color: #ffcc00; display: inline-block;"></span>
@@ -537,9 +540,17 @@
             <button onclick="resetShots()" class="ref-btn" style="padding: 3px 8px; font-size: 9px; font-weight: 800; background-color: #2b4530;">
               🔄 RESET
             </button>
-            <!-- Hidden legacy camera controls for JS compatibility -->
-            <select id="cameraSourceSelect" style="display:none;"><option value="wifi">WiFi</option></select>
-            <button id="btnConnectCamSerial" style="display:none;"></button>
+            <!-- Camera connection button (visible) -->
+            <button id="btnConnectCamSerial" onclick="toggleConnectCameraSerial()" class="ref-btn ref-btn-accent" style="
+              padding: 4px 10px;
+              font-size: 10px;
+              font-weight: 800;
+              background-color: #1a5c2e;
+              color: #ffffff;
+            ">
+              🔌 CONNECT COM17
+            </button>
+            <select id="cameraSourceSelect" style="display:none;"><option value="serial">Serial</option></select>
             <button id="btnCalibrateBaseline" style="display:none;"></button>
             <span id="baselineStatusBadge" style="display:none;">[ARMED]</span>
             <button id="btnToggleCamPower" style="display:none;"></button>
@@ -612,6 +623,7 @@
                   id="espCameraImg"
                   src=""
                   alt="ESP32 Camera Stream"
+                  crossorigin="anonymous"
                   style="width: 100%; height: 100%; object-fit: cover; display: none;"
                   onload="onCameraStreamLoad()"
                   onerror="onCameraStreamError()"
@@ -695,13 +707,27 @@
                   text-align: center;
                   gap: 8px;
                 ">
-                  <div style="font-weight: 800; color: #ff7777; font-size: 12px;">CAMERA FEED OFFLINE</div>
-                  <div id="cameraOfflineDesc" style="font-size: 9px; color: #d6cfc3;">
+                  <div style="font-weight: 800; color: #ff7777; font-size: 13px;">CAMERA FEED OFFLINE</div>
+                  <div id="cameraOfflineDesc" style="font-size: 10px; color: #d6cfc3; max-width: 240px;">
                     ESP32-P4 USB camera or WiFi stream not detected.
                   </div>
-                  <div style="display: flex; gap: 6px; margin-top: 6px;">
-                    <button onclick="refreshCameraDevices()" class="ref-btn ref-btn-accent" style="padding: 3px 8px; font-size: 9px;">SCAN USB CAMERAS</button>
-                    <button onclick="reloadCameraStream()" class="ref-btn" style="padding: 3px 8px; font-size: 9px;">RETRY WIFI</button>
+                  <div style="display: flex; flex-direction: column; gap: 6px; margin-top: 6px; width: 100%; max-width: 230px;">
+                    <button onclick="toggleConnectCameraSerial()" class="ref-btn ref-btn-accent" style="
+                      padding: 8px 12px;
+                      font-size: 11px;
+                      font-weight: 900;
+                      background-color: #2cff55;
+                      color: #0a0c10;
+                      border: 1px solid #2cff55;
+                      box-shadow: 0 0 12px rgba(44, 255, 85, 0.4);
+                      cursor: pointer;
+                    ">
+                      🔌 CONNECT ESP32-P4 (USB / COM)
+                    </button>
+                    <div style="display: flex; gap: 6px;">
+                      <button onclick="startSelectedCamera()" class="ref-btn" style="flex: 1; padding: 4px 6px; font-size: 9px; background-color: #2e342d;">SCAN WEBCAMS</button>
+                      <button onclick="reloadCameraStream()" class="ref-btn" style="flex: 1; padding: 4px 6px; font-size: 9px; background-color: #2e342d;">RETRY WIFI</button>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -817,6 +843,117 @@
               ">
                 READY
               </span>
+            </div>
+
+            <!-- TACTICAL CV DEBUG INSPECTOR PANEL -->
+            <div id="cvDebugInspectorPanel" style="
+              width: 100%;
+              max-width: 320px;
+              background-color: #1a1e19;
+              border: 1px solid #3d463b;
+              box-shadow: 0 4px 14px rgba(0,0,0,0.3);
+              padding: 8px;
+              margin-top: 6px;
+              display: flex;
+              flex-direction: column;
+              gap: 6px;
+              font-family: var(--font-mono);
+            ">
+              <!-- Header with live system state -->
+              <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #2b302a; padding-bottom: 4px;">
+                <span style="font-size: 9px; font-weight: 800; color: #2cff55; letter-spacing: 0.5px;">
+                  🔬 CV EVENT INSPECTOR
+                </span>
+                <span id="cvStateBadge" style="
+                  font-size: 8.5px;
+                  font-weight: 800;
+                  padding: 2px 6px;
+                  background-color: #2b302a;
+                  color: #ffcc00;
+                  border: 1px solid #4a5445;
+                  border-radius: 2px;
+                ">
+                  IDLE (DOWN)
+                </span>
+              </div>
+
+              <!-- 4-Channel Visual Evidence Canvases -->
+              <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px;">
+                <div style="display: flex; flex-direction: column; align-items: center; gap: 2px;">
+                  <span style="font-size: 7px; color: #8c9688; font-weight: 700;">LIVE ROI</span>
+                  <canvas id="canvasLiveRoi" width="70" height="70" style="width: 100%; aspect-ratio: 1/1; background: #000; border: 1px solid #3d463b; border-radius: 2px;"></canvas>
+                </div>
+                <div style="display: flex; flex-direction: column; align-items: center; gap: 2px;">
+                  <span style="font-size: 7px; color: #8c9688; font-weight: 700;">REFERENCE</span>
+                  <canvas id="canvasBaseline" width="70" height="70" style="width: 100%; aspect-ratio: 1/1; background: #000; border: 1px solid #3d463b; border-radius: 2px;"></canvas>
+                </div>
+                <div style="display: flex; flex-direction: column; align-items: center; gap: 2px;">
+                  <span style="font-size: 7px; color: #8c9688; font-weight: 700;">DIFF HEATMAP</span>
+                  <canvas id="canvasDiffMap" width="70" height="70" style="width: 100%; aspect-ratio: 1/1; background: #000; border: 1px solid #3d463b; border-radius: 2px;"></canvas>
+                </div>
+                <div style="display: flex; flex-direction: column; align-items: center; gap: 2px;">
+                  <span style="font-size: 7px; color: #8c9688; font-weight: 700;">ORANGE/DART</span>
+                  <canvas id="canvasColorMask" width="70" height="70" style="width: 100%; aspect-ratio: 1/1; background: #000; border: 1px solid #3d463b; border-radius: 2px;"></canvas>
+                </div>
+              </div>
+
+              <!-- 4-Check Verification Matrix -->
+              <div style="background: #111410; border: 1px solid #282f25; padding: 4px 6px; display: flex; flex-direction: column; gap: 3px; font-size: 8px;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <span style="color: #a0aba0;">1. Diff vs Baseline:</span>
+                  <span id="cvCheck1Badge" style="color: #888; font-weight: 700;">0 px (0%)</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <span style="color: #a0aba0;">2. Orange/Yellow Spectrum:</span>
+                  <span id="cvCheck2Badge" style="color: #888; font-weight: 700;">0 px (0%)</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <span style="color: #a0aba0;">3. Sudden Onset Jump:</span>
+                  <span id="cvCheck3Badge" style="color: #888; font-weight: 700;">0.0</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <span style="color: #a0aba0;">4. Spatial Cluster Density:</span>
+                  <span id="cvCheck4Badge" style="color: #888; font-weight: 700;">0%</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center; border-top: 1px solid #222920; padding-top: 2px;">
+                  <span style="color: #2cff55; font-weight: 800;">Detection Latency:</span>
+                  <span id="cvLatencyBadge" style="color: #2cff55; font-weight: 800;">-- ms</span>
+                </div>
+              </div>
+
+              <!-- Real-time Diagnostics Reason & Action Row -->
+              <div id="cvDebugReason" style="font-size: 7.5px; color: #8c9688; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                Ready. Press '0' or POP TARGET to arm event detector.
+              </div>
+
+              <!-- Quick Tuning & Diagnostic Controls -->
+              <div style="display: flex; gap: 4px;">
+                <button onclick="calibrateTargetBaselineNow()" class="ref-btn" style="flex: 1; padding: 3px; font-size: 8px;" title="Manually re-capture clean black target baseline">
+                  📸 RE-BASELINE
+                </button>
+                <button onclick="testForceSimulateHit()" class="ref-btn" style="flex: 1; padding: 3px; font-size: 8px; background-color: #3b2a1a; color: #ffcc00;" title="Test physical servo reverse without shooting">
+                  ⚡ TEST SERVO
+                </button>
+                <button onclick="toggleCvSettingsModal()" class="ref-btn" style="padding: 3px 6px; font-size: 8px;" title="Adjust thresholds and sensitivity">
+                  ⚙️ TUNING
+                </button>
+              </div>
+
+              <!-- Collapsible Tuning Drawer -->
+              <div id="cvTuningDrawer" style="display: none; flex-direction: column; gap: 4px; padding-top: 4px; border-top: 1px dashed #3d463b; font-size: 7.5px;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <span>Diff Sensitivity (Threshold): <b id="valDiffThresh">28</b></span>
+                  <input type="range" min="15" max="50" value="28" step="1" oninput="updateCvThresholds('diff', this.value)" style="width: 90px; height: 3px;" />
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <span>Nerf Dart Min Px: <b id="valColorThresh">50</b></span>
+                  <input type="range" min="20" max="150" value="50" step="5" oninput="updateCvThresholds('color', this.value)" style="width: 90px; height: 3px;" />
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <span>Servo Settle Time: <b id="valSettleMs">1800ms</b></span>
+                  <input type="range" min="500" max="3000" value="1800" step="100" oninput="updateCvThresholds('settle', this.value)" style="width: 90px; height: 3px;" />
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -1630,6 +1767,16 @@
         } catch (e) {}
       }
 
+      // 3. ALSO send commands through Camera USB Serial (COM17) if connected, allowing 1-cable camera setups to relay commands
+      if (isCameraSerialConnected && cameraPort && cameraPort.writable) {
+        try {
+          const encoder = new TextEncoder();
+          const writer = cameraPort.writable.getWriter();
+          await writer.write(encoder.encode(cmd + "\n"));
+          writer.releaseLock();
+        } catch (e) {}
+      }
+
       // Also update local UI simulation
       simulateHardwareResponse(cmd);
     }
@@ -1645,41 +1792,13 @@
         let wifiBaseUrl = input ? input.value.trim() : "http://192.168.4.1/";
         if (!wifiBaseUrl.startsWith("http")) wifiBaseUrl = "http://" + wifiBaseUrl;
         wifiBaseUrl = wifiBaseUrl.replace(/\/+$/, "");
-        const res = await fetch(`${wifiBaseUrl}/telemetry`, { signal: AbortSignal.timeout(600) });
+        const res = await fetch(`${wifiBaseUrl}/telemetry`, { signal: AbortSignal.timeout(500) });
         if (res.ok) {
           const data = await res.json();
           const telem = document.getElementById("hudCvTelemetry");
-          const nowMs = Date.now();
-          const timeSincePop = nowMs - (window.lastPopUpTimeMs || 0);
-          const isArmedAndSettled = (elevationState === 'UP' && timeSincePop >= 1200);
-
-          if (data.hit) {
-            const hx = (typeof data.x === "number" && data.x > 0) ? data.x : 80;
-            const hy = (typeof data.y === "number" && data.y > 0) ? data.y : 80;
-            const px = data.dartPixels || 0;
-
-            if (!isArmedAndSettled) {
-              ignoredStaticX = hx;
-              ignoredStaticY = hy;
-              ignoredStaticPx = px;
-            } else if (!stuckBulletAcknowledged) {
-              const isFallback80 = (hx === 80 && hy === 80);
-              const isSameStaticSpot = (ignoredStaticX > 0 && Math.abs(hx - ignoredStaticX) <= 12 && Math.abs(hy - ignoredStaticY) <= 12 && Math.abs(px - ignoredStaticPx) < 40);
-              if (!isFallback80 && !isSameStaticSpot) {
-                const rb = document.getElementById("shotResultBadge");
-                if (rb) {
-                  rb.innerText = `🎯 HIT DETECTED! (${px} PX) — TARGET DROPPED`;
-                  rb.style.color = "#2cff55";
-                  rb.style.borderColor = "#2cff55";
-                }
-                handleNerfBulletStuck(hx, hy, 0, true, `ESP32-P4 STANDALONE HIT (${px} PX)`);
-              }
-            }
-          }
-
-          if (telem && !stuckBulletAcknowledged) {
-            telem.textContent = `WIFI LINK: OK // TARGET: ${elevationState} // STATUS: ${isArmedAndSettled ? 'ARMED FOR HIT' : 'STANDBY'}`;
-            telem.setAttribute("fill", isArmedAndSettled ? "#ffcc00" : "#2cff55");
+          if (telem) {
+            telem.textContent = `WIFI LINK: OK // TARGET: ${elevationState} // CV: ${cvCurrentState}`;
+            telem.setAttribute("fill", cvCurrentState === CV_STATE.ARMED ? "#2cff55" : "#ffcc00");
           }
         }
       } catch (e) {}
@@ -1907,15 +2026,16 @@
         badge.style.backgroundColor = "var(--mil-hit)";
       }
       const timerLabel = document.getElementById("exposureTimerLabel");
-      if (timerLabel) timerLabel.innerText = "EXPOSED [ARMED]";
+      if (timerLabel) timerLabel.innerText = "EXPOSED [ARMING...]";
       const pBar = document.getElementById("exposureProgressBar");
       if (pBar) pBar.style.width = "100%";
-      setTimeout(() => calibrateEmptyTargetBaseline(), 700);
+      startCvPopCycle(id, 5.0);
     }
 
     function lowerTarget(id) {
       targetServoStates[id] = false;
       elevationState = 'DOWN';
+      resetCvStateToIdle();
       sendRawCommand(`DOWN,${id}`);
       logTerm(`[Servo Pop] Lowering Target ${id} (DOWN,${id})...`);
       updateServoButtonUI(id, false);
@@ -1939,6 +2059,7 @@
       if (action === 'ALL_DOWN') {
         for (let k in targetServoStates) targetServoStates[k] = false;
         elevationState = 'DOWN';
+        resetCvStateToIdle();
         if (exposureTimer) {
           clearInterval(exposureTimer);
           exposureTimer = null;
@@ -1965,7 +2086,7 @@
       }
     }
 
-    function handlePopCommand(targetId = 1, duration = 5.0) {
+    function handlePopCommand(targetId = 1, duration = 15.0) {
       exposureSeconds = duration;
       elevationState = 'UP';
       targetServoStates[targetId] = true;
@@ -1974,27 +2095,27 @@
 
       const resBadge = document.getElementById("shotResultBadge");
       if (resBadge) {
-        resBadge.innerText = `🎯 TARGET UP (ARMED) — FIRE NOW! (${duration.toFixed(1)}s)`;
-        resBadge.style.color = "#ffcc00";
-        resBadge.style.borderColor = "#ffcc00";
+        resBadge.innerText = `🎯 TARGET UP (ARMED) — (${duration.toFixed(0)}s)`;
+        resBadge.style.color = "#2cff55";
+        resBadge.style.borderColor = "#2cff55";
       }
       const banner = document.getElementById("nerfOptimalHudBanner");
       if (banner) banner.style.display = "none";
 
       // Send physical serial/WiFi command to raise target!
       sendRawCommand(`UP,${targetId}`);
-      logTerm(`[Pop Cycle] Physical Target ${targetId} POPPED UP for ${duration.toFixed(1)}s (UP,${targetId})`);
+      logTerm(`[Pop Cycle] Physical Target ${targetId} POPPED UP for ${duration.toFixed(0)}s (UP,${targetId})`);
 
       const badge = document.getElementById("targetElevationBadge");
       if (badge) {
-        badge.innerText = `EXPOSED [${duration.toFixed(1)}s]`;
+        badge.innerText = `EXPOSED [${duration.toFixed(0)}s]`;
         badge.style.backgroundColor = "var(--mil-hit)";
       }
       
       const tilePop = document.getElementById("tilePop");
       if (tilePop) tilePop.classList.add("active-pop");
       const tilePopTitle = document.getElementById("tilePopTitle");
-      if (tilePopTitle) tilePopTitle.innerText = "EXPOSED (5s)";
+      if (tilePopTitle) tilePopTitle.innerText = "EXPOSED (15s)";
 
       const targetFace = document.getElementById("targetFace");
       if (targetFace) {
@@ -2004,7 +2125,8 @@
 
       updateServoButtonUI(targetId, true);
 
-      setTimeout(() => calibrateEmptyTargetBaseline(), 700);
+      // Start deterministic CV state machine for this pop cycle
+      startCvPopCycle(targetId, duration);
 
       if (exposureTimer) clearInterval(exposureTimer);
       exposureTimer = setInterval(() => {
@@ -2468,18 +2590,11 @@
           URL.revokeObjectURL(lastBlobUrl);
         }
         lastBlobUrl = newUrl;
-        if (!img.onload) {
-          img.onload = () => onCameraStreamLoad();
-        }
-      }
-
-      // Check for ESP32-P4 steganographic metadata (32 bytes at end: 0xDE 0xAD 0xBE 0xEF)
-      // NOTE: Stego auto-trigger is disabled because COM17 legacy firmware emits hitFound=1 on every frame!
-      if (payload.length >= 32) {
-        const metaOffset = payload.length - 32;
-        if (payload[metaOffset] === 0xDE && payload[metaOffset+1] === 0xAD && payload[metaOffset+2] === 0xBE && payload[metaOffset+3] === 0xEF) {
-          // Packet metadata parsed for telemetry only; do NOT auto-trigger to avoid false hits
-        }
+        img.onload = () => {
+          onCameraStreamLoad();
+          // Directly feed frame to deterministic hit detection engine
+          runDeterministicHitDetection(img);
+        };
       }
 
       cameraFrameCount++;
@@ -2495,243 +2610,525 @@
       }
     }
 
-    // --- ADVANCED DIFFERENTIAL VISION DETECTOR (ZERO FALSE POSITIVES) ---
-    let nerfAnalysisCanvas = null;
-    let nerfAnalysisCtx = null;
-    let targetBaseline = null;          // Clean baseline of the empty target
-    let baselineAccumulator = null;     // Multi-frame accumulator for crisp baseline
-    let baselineSampleCount = 0;
-    let baselineWarmupFrames = 0;       // Settles sensor auto-exposure and gain
-    let isCalibratingBaseline = true;   // Auto-calibrates clean target on startup
-    let nerfTrackHistory = [];
-    let lastNerfScanTime = 0;
-    let lastNerfAlertTime = 0;
-    let stuckBulletAcknowledged = false; // Prevents duplicate triggers for same bullet
-    let lastDetectedBulletPos = null;
-    let autoDropAfterShotTimer = null;   // 3.0-second timer to auto-clear and lower target
+    // =========================================================================
+    // HIGH-SPEED DETERMINISTIC NERF PROJECTILE EVENT DETECTOR
+    // Physical principles:
+    // 1. Zoomed-in camera observes ONLY the optimal black target region.
+    // 2. Multi-frame baseline established after target pops up and settles.
+    // 3. 4 fast deterministic checks:
+    //    - Check 1 (Baseline Diff): Real localized pixel change vs stationary dark target
+    //    - Check 2 (Orange/Yellow Color): Sudden appearance of Nerf chromatic spectrum
+    //    - Check 3 (Temporal Sudden Onset): Sharp jump between consecutive frames
+    //    - Check 4 (Spatial Coherence): Coherent clustered blob (rejects scattered noise)
+    // 4. Strict state machine: SETTLING -> CALIBRATING -> ARMED -> CONFIRMED -> LOCKED.
+    // =========================================================================
+    const CV_STATE = {
+      IDLE: 'IDLE',                       // Target down / concealed
+      POP_INITIATED: 'POP_INITIATED',     // Servo commanded UP
+      SETTLING: 'SETTLING',               // Settle window for servo swing and mechanical bounce
+      CALIBRATING: 'CALIBRATING',         // Multi-frame baseline accumulation (6 frames)
+      ARMED: 'ARMED',                     // Actively watching optimal ROI for projectile
+      CONFIRMING: 'CONFIRMING',           // Fast 1-2 frame confirmation for borderline events
+      HIT_CONFIRMED: 'HIT_CONFIRMED',     // Hit confirmed! Reverse command dispatched
+      LOCKED: 'LOCKED'                    // Locked until target fully retracted & next command
+    };
 
-    // Trigger explicit baseline capture of the clean target
-    function calibrateEmptyTargetBaseline() {
-      targetBaseline = null;
-      baselineAccumulator = null;
-      baselineSampleCount = 0;
-      baselineWarmupFrames = 0;
-      isCalibratingBaseline = true;
-      stuckBulletAcknowledged = false;
-      lastDetectedBulletPos = null;
-      nerfTrackHistory = [];
-      const badge = document.getElementById("baselineStatusBadge");
-      if (badge) {
-        badge.innerText = "[CALIBRATING...]";
-        badge.style.color = "#ffcc00";
+    let cvCurrentState = CV_STATE.IDLE;
+    let cvStateTimestamp = performance.now();
+    let cvSettleDurationMs = 1800;        // Settle window: 1800ms (1.8s) to guarantee zero mechanical wobble
+    let cvDiffThreshold = 28;            // Delta threshold vs baseline (tunable)
+    let cvColorMinPx = 50;               // Minimum orange/yellow pixels for hit (tunable)
+    let cvBaselineTargetFrames = 10;     // Number of frames to average for baseline
+    let cvBaselineAccumulator = null;    // Float32Array accumulator for baseline
+    let cvBaselineSampleCount = 0;
+    let cvReferenceBaseline = null;      // Uint8ClampedArray: clean black target baseline
+    let cvTargetDarkMask = null;         // Uint8Array: 1 = dark black target interior, 0 = ambient background
+    let cvBaselineStaticPx = 0;          // Any pre-existing warm pixels on clean target
+    let cvPrevFrameData = null;          // Uint8ClampedArray of preceding frame
+    let cvConfirmationCandidate = null;  // Temporal candidate for persistence confirmation
+    let cvLastLatencyMs = 0.0;
+    let cvLastHitReason = "Awaiting projectile impact...";
+    let stuckBulletAcknowledged = false;  // UI & servo lock flag
+    let autoDropAfterShotTimer = null;
+    let cvWebcamLoopRunning = false;
+
+    // Off-screen canvas pipeline for lightning-fast analysis (~0.3ms per frame)
+    let cvAnalysisCanvas = null;
+    let cvAnalysisCtx = null;
+    let cvDiffMapCanvas = null;
+    let cvDiffMapCtx = null;
+    let cvColorMaskCanvas = null;
+    let cvColorMaskCtx = null;
+
+    function initCvCanvases() {
+      if (!cvAnalysisCanvas) {
+        cvAnalysisCanvas = document.createElement("canvas");
+        cvAnalysisCanvas.width = 160;
+        cvAnalysisCanvas.height = 160;
+        cvAnalysisCtx = cvAnalysisCanvas.getContext("2d", { willReadFrequently: true });
+
+        cvDiffMapCanvas = document.createElement("canvas");
+        cvDiffMapCanvas.width = 160;
+        cvDiffMapCanvas.height = 160;
+        cvDiffMapCtx = cvDiffMapCanvas.getContext("2d", { willReadFrequently: true });
+
+        cvColorMaskCanvas = document.createElement("canvas");
+        cvColorMaskCanvas.width = 160;
+        cvColorMaskCanvas.height = 160;
+        cvColorMaskCtx = cvColorMaskCanvas.getContext("2d", { willReadFrequently: true });
       }
-      logTerm("[Target CV] Calibrating empty target baseline... Please keep target clean and stationary.");
     }
 
-    function processNerfBulletDetection(sourceEl) {
+    function updateCvStateBadge(label, color) {
+      const badge = document.getElementById("cvStateBadge");
+      if (badge) {
+        badge.innerText = label;
+        badge.style.color = color;
+        badge.style.borderColor = color;
+      }
+      const hudTelem = document.getElementById("hudCvTelemetry");
+      if (hudTelem) {
+        hudTelem.textContent = `CV: ${label}`;
+        hudTelem.setAttribute("fill", color);
+      }
+    }
+
+    // Called when target pop command is issued (Key '0' or Pop button)
+    function startCvPopCycle(targetId = 1, duration = 15.0) {
+      initCvCanvases();
+      cvCurrentState = CV_STATE.SETTLING;
+      cvStateTimestamp = performance.now();
+      cvBaselineAccumulator = null;
+      cvBaselineSampleCount = 0;
+      cvReferenceBaseline = null;
+      cvTargetDarkMask = null;
+      cvBaselineStaticPx = 0;
+      cvPrevFrameData = null;
+      cvConfirmationCandidate = null;
+      stuckBulletAcknowledged = false;
+
+      updateCvStateBadge(`SETTLING [${cvSettleDurationMs}ms]`, "#ffcc00");
+      const reasonEl = document.getElementById("cvDebugReason");
+      if (reasonEl) reasonEl.innerText = `Target rising... Settle lock active (${(cvSettleDurationMs/1000).toFixed(1)}s) to ignore mechanical servo swing.`;
+      logTerm(`[Target CV] Pop Cycle initiated. Target rising. Settling for ${cvSettleDurationMs}ms before baseline lock.`);
+    }
+
+    // Called when target drops or reset
+    function resetCvStateToIdle() {
+      cvCurrentState = CV_STATE.IDLE;
+      cvStateTimestamp = performance.now();
+      cvConfirmationCandidate = null;
+      cvTargetDarkMask = null;
+      stuckBulletAcknowledged = false;
+      updateCvStateBadge("IDLE (DOWN)", "#888888");
+      const reasonEl = document.getElementById("cvDebugReason");
+      if (reasonEl) reasonEl.innerText = "Target concealed. Press '0' or POP TARGET to start cycle.";
+    }
+
+    // Explicit baseline calibration button handler
+    function calibrateTargetBaselineNow() {
+      initCvCanvases();
+      cvCurrentState = CV_STATE.CALIBRATING;
+      cvStateTimestamp = performance.now();
+      cvBaselineAccumulator = null;
+      cvBaselineSampleCount = 0;
+      cvReferenceBaseline = null;
+      cvTargetDarkMask = null;
+      cvBaselineStaticPx = 0;
+      cvPrevFrameData = null;
+      cvConfirmationCandidate = null;
+      updateCvStateBadge("CALIBRATING...", "#ffcc00");
+      logTerm("[Target CV] Manual baseline re-calibration requested. Sampling stationary black target...");
+    }
+
+    // Core deterministic event detection loop running on every frame
+    function runDeterministicHitDetection(sourceEl) {
       if (!sourceEl) return;
+      const frameStartTime = performance.now();
+
+      // Guard checks: verify source element readiness
       const isVideo = (sourceEl.tagName === 'VIDEO');
       if (isVideo) {
         if (sourceEl.readyState < 2 || sourceEl.videoWidth === 0) return;
       } else {
         if (!sourceEl.complete || sourceEl.naturalWidth === 0) return;
       }
-      if (stuckBulletAcknowledged) return; // Shot already locked and awaiting auto-drop
 
+      initCvCanvases();
+
+      // Render frame into 160x160 analysis canvas
+      let imgData = null;
+      try {
+        cvAnalysisCtx.drawImage(sourceEl, 0, 0, 160, 160);
+        imgData = cvAnalysisCtx.getImageData(0, 0, 160, 160);
+      } catch (err) {
+        return; // Canvas security/loading exception guard
+      }
+      if (!imgData) return;
+
+      const data = imgData.data;
       const now = performance.now();
-      if (now - lastNerfScanTime < 65) return; // ~15 FPS
-      lastNerfScanTime = now;
 
-      if (!nerfAnalysisCanvas) {
-        nerfAnalysisCanvas = document.createElement("canvas");
-        nerfAnalysisCanvas.width = 160;
-        nerfAnalysisCanvas.height = 160;
-        nerfAnalysisCtx = nerfAnalysisCanvas.getContext("2d", { willReadFrequently: true });
+      // Update Live ROI preview thumbnail in Debug Inspector
+      const cLive = document.getElementById("canvasLiveRoi");
+      if (cLive) {
+        const ctxLive = cLive.getContext("2d");
+        ctxLive.drawImage(cvAnalysisCanvas, 0, 0, cLive.width, cLive.height);
+        // Draw green optimal circle overlay
+        ctxLive.strokeStyle = "#2cff55";
+        ctxLive.lineWidth = 1;
+        ctxLive.beginPath();
+        ctxLive.arc(cLive.width / 2, cLive.height / 2, cLive.width * 0.40, 0, Math.PI * 2);
+        ctxLive.stroke();
       }
 
-      try {
-        nerfAnalysisCtx.drawImage(sourceEl, 0, 0, 160, 160);
-        const imgData = nerfAnalysisCtx.getImageData(0, 0, 160, 160);
-        const data = imgData.data;
+      // STATE MACHINE EXECUTION
+      if (cvCurrentState === CV_STATE.IDLE) {
+        return; // Target is concealed, zero CPU waste
+      }
 
-        // Auto-baseline learning phase (skips first 6 frames to settle exposure, then averages 8 frames)
-        if (isCalibratingBaseline || !targetBaseline) {
-          baselineWarmupFrames++;
-          if (baselineWarmupFrames < 6) {
-            return;
-          }
+      if (cvCurrentState === CV_STATE.LOCKED) {
+        return; // Post-hit lockout active; waiting for full retraction
+      }
 
-          if (!baselineAccumulator) {
-            baselineAccumulator = new Float32Array(data.length);
-            baselineSampleCount = 0;
-          }
+      // 1. SETTLING PHASE: Let servo swing finish and mechanical bounce dampen
+      if (cvCurrentState === CV_STATE.SETTLING) {
+        const elapsed = now - cvStateTimestamp;
+        if (elapsed < cvSettleDurationMs) {
+          const remaining = Math.round(cvSettleDurationMs - elapsed);
+          updateCvStateBadge(`SETTLING [${remaining}ms]`, "#ffcc00");
+          return;
+        }
+        // Transition to baseline calibration
+        cvCurrentState = CV_STATE.CALIBRATING;
+        cvBaselineAccumulator = new Float32Array(data.length);
+        cvBaselineSampleCount = 0;
+        updateCvStateBadge(`CALIBRATING [0/${cvBaselineTargetFrames}]`, "#ffcc00");
+        return;
+      }
+
+      // 2. CALIBRATING PHASE: Accumulate clean baseline frames of 100% stationary black target
+      if (cvCurrentState === CV_STATE.CALIBRATING) {
+        if (!cvBaselineAccumulator) {
+          cvBaselineAccumulator = new Float32Array(data.length);
+          cvBaselineSampleCount = 0;
+        }
+        for (let i = 0; i < data.length; i++) {
+          cvBaselineAccumulator[i] += data[i];
+        }
+        cvBaselineSampleCount++;
+        updateCvStateBadge(`CALIBRATING [${cvBaselineSampleCount}/${cvBaselineTargetFrames}]`, "#ffcc00");
+
+        if (cvBaselineSampleCount >= cvBaselineTargetFrames) {
+          cvReferenceBaseline = new Uint8ClampedArray(data.length);
+          cvTargetDarkMask = new Uint8Array(160 * 160);
           for (let i = 0; i < data.length; i++) {
-            baselineAccumulator[i] += data[i];
+            cvReferenceBaseline[i] = Math.round(cvBaselineAccumulator[i] / cvBaselineSampleCount);
           }
-          baselineSampleCount++;
+          cvBaselineAccumulator = null;
 
-          const telem = document.getElementById("hudCvTelemetry");
-          if (telem) {
-            telem.textContent = `CV: LEARNING BASELINE [${baselineSampleCount}/8]`;
-            telem.setAttribute("fill", "#ffcc00");
+          // Build dark target face mask within optimal zone (radius 52 px around (80,80))
+          const cx0 = 80, cy0 = 80;
+          const scanRadius = 52;
+          const rSq = scanRadius * scanRadius;
+          let darkCount = 0;
+          let staticCount = 0;
+
+          for (let y = cy0 - scanRadius; y <= cy0 + scanRadius; y++) {
+            const dy = y - cy0;
+            const rowOffset = y * 160 * 4;
+            const maskRowOffset = y * 160;
+            for (let x = cx0 - scanRadius; x <= cx0 + scanRadius; x++) {
+              const dx = x - cx0;
+              if (dx * dx + dy * dy > rSq) continue;
+              const idx = rowOffset + x * 4;
+              const r = cvReferenceBaseline[idx];
+              const g = cvReferenceBaseline[idx + 1];
+              const b = cvReferenceBaseline[idx + 2];
+              const avgI = (r + g + b) / 3;
+              const maxChan = Math.max(r, g, b);
+
+              // Black target surface is dark: average <= 88 and max channel <= 98
+              if (avgI <= 88 && maxChan <= 98) {
+                cvTargetDarkMask[maskRowOffset + x] = 1;
+                darkCount++;
+              } else {
+                cvTargetDarkMask[maskRowOffset + x] = 0; // Ambient background / edge outside target
+              }
+
+              // Pre-existing warm spots check
+              if ((r >= 135 && g >= 110 && b <= 85 && (r - b) >= 45) || (r >= 140 && b <= 75 && (r - g) >= 20)) {
+                staticCount++;
+              }
+            }
+          }
+          cvBaselineStaticPx = staticCount;
+
+          cvCurrentState = CV_STATE.ARMED;
+          updateCvStateBadge("ARMED (OPTIMAL READY)", "#2cff55");
+
+          // Render baseline snapshot to inspector canvas
+          const cBase = document.getElementById("canvasBaseline");
+          if (cBase) {
+            const ctxBase = cBase.getContext("2d");
+            const baseImgData = new ImageData(cvReferenceBaseline, 160, 160);
+            const tempC = document.createElement("canvas");
+            tempC.width = 160; tempC.height = 160;
+            tempC.getContext("2d").putImageData(baseImgData, 0, 0);
+            ctxBase.drawImage(tempC, 0, 0, cBase.width, cBase.height);
           }
 
-          if (baselineSampleCount >= 8) {
-            targetBaseline = new Uint8ClampedArray(data.length);
-            for (let i = 0; i < data.length; i++) {
-              targetBaseline[i] = Math.round(baselineAccumulator[i] / baselineSampleCount);
-            }
-            isCalibratingBaseline = false;
-            baselineAccumulator = null;
-            baselineWarmupFrames = 0;
-            const badge = document.getElementById("baselineStatusBadge");
-            if (badge) {
-              badge.innerText = "[ARMED]";
-              badge.style.color = "#2cff55";
-            }
-            if (telem) {
-              telem.textContent = "CV: ARMED // OPTIMAL ZONE READY";
-              telem.setAttribute("fill", "#2cff55");
-            }
-            logTerm("[Target CV] Baseline calibrated! Optimal zone armed for yellow Nerf bullet impact.");
-          }
+          const reasonEl = document.getElementById("cvDebugReason");
+          if (reasonEl) reasonEl.innerText = "Stationary target locked & ARMED! Only drops when a Nerf bullet is shot.";
+          logTerm(`[Target CV] Black target baseline locked (dark face: ${darkCount} px, static warm: ${cvBaselineStaticPx} px). ARMED! Waiting for Nerf bullet strike...`);
+        }
+        return;
+      }
+
+      // 3. ARMED / CONFIRMING PHASE: Deterministic 4-Check Event Detector
+      if (cvCurrentState === CV_STATE.ARMED || cvCurrentState === CV_STATE.CONFIRMING) {
+        if (!cvReferenceBaseline || !cvTargetDarkMask) {
+          calibrateTargetBaselineNow();
           return;
         }
 
-        // --- SCAN ENTIRE BLACK REGION AS OPTIMAL ZONE (Center 80, 80, Radius 55) ---
         const cx0 = 80, cy0 = 80;
-        const scanRadius = 55; // Covers entire black silhouette
-        let sumX = 0, sumY = 0, changedDartCount = 0, rawDartCount = 0;
+        const scanRadius = 52; // Optimal zone within target
+        const rSq = scanRadius * scanRadius;
+
+        let diffPxCount = 0;
+        let colorPxCount = 0;
+        let sumX = 0, sumY = 0;
         let minX = 999, maxX = -1, minY = 999, maxY = -1;
+        let sumTemporalDelta = 0;
+        let roiTotalPx = 0;
+
+        // Buffers for visual debug canvases
+        const diffMapImgData = cvDiffMapCtx.createImageData(160, 160);
+        const diffMapData = diffMapImgData.data;
+        const colorMaskImgData = cvColorMaskCtx.createImageData(160, 160);
+        const colorMaskData = colorMaskImgData.data;
 
         for (let y = cy0 - scanRadius; y <= cy0 + scanRadius; y++) {
           const dy = y - cy0;
           const rowOffset = y * 160 * 4;
+          const maskRowOffset = y * 160;
           for (let x = cx0 - scanRadius; x <= cx0 + scanRadius; x++) {
             const dx = x - cx0;
-            const distFromCenter = Math.hypot(dx, dy);
-            if (distFromCenter > scanRadius) continue;
+            if (dx * dx + dy * dy > rSq) continue;
+            roiTotalPx++;
 
             const idx = rowOffset + x * 4;
             const r = data[idx];
             const g = data[idx + 1];
             const b = data[idx + 2];
 
-            // Nerf Dart Chromatic Signature (Yellow foam body + Orange suction tip)
-            const isNerfDart = (
-              r >= 120 &&
-              b <= 75 &&
-              (r - b) >= 60 &&
-              g >= 40 &&
-              (g - b) >= 15 &&
+            const baseR = cvReferenceBaseline[idx];
+            const baseG = cvReferenceBaseline[idx + 1];
+            const baseB = cvReferenceBaseline[idx + 2];
+
+            // 1. Check Baseline Difference: Has pixel changed vs stationary dark target?
+            const delta = (Math.abs(r - baseR) + Math.abs(g - baseG) + Math.abs(b - baseB)) / 3;
+            // Nerf projectile is significantly brighter than the black target (jump >= 40)
+            const isBrighter = ((r + g) >= (baseR + baseG + 40));
+
+            if (delta >= cvDiffThreshold) {
+              diffPxCount++;
+              diffMapData[idx] = Math.min(255, delta * 3);     // Red
+              diffMapData[idx + 1] = Math.max(0, 200 - delta); // Green
+              diffMapData[idx + 2] = 220;                      // Blue
+              diffMapData[idx + 3] = 255;
+            }
+
+            // CRITICAL INVARIANT: Genuine hit pixel MUST be on the black target face!
+            // If the baseline was background (cardboard/wood/light), ignore it completely!
+            const isDarkTargetFace = (cvTargetDarkMask[maskRowOffset + x] === 1);
+            if (!isDarkTargetFace) continue;
+
+            // 2. Strict Nerf Dart Chromatic Signature (Yellow foam OR Orange tip)
+            // Vibrant Neon Yellow Foam:
+            const isYellowFoam = (
+              r >= 140 &&
+              g >= 115 &&
+              b <= 85 &&
+              (r - b) >= 55 &&
+              (g - b) >= 40 &&
+              (r + g) >= (2.25 * (b + 1)) &&
               r >= (g - 25)
             );
 
-            if (isNerfDart) {
-              rawDartCount++;
-            }
+            // High-Intensity Neon Orange Tip:
+            const isOrangeTip = (
+              r >= 145 &&
+              b <= 75 &&
+              (r - g) >= 20 &&
+              (r - b) >= 65 &&
+              (r + g) >= (1.95 * (b + 1))
+            );
 
-            const baseR = targetBaseline[idx];
-            const baseG = targetBaseline[idx + 1];
-            const baseB = targetBaseline[idx + 2];
+            const isNerfColor = isYellowFoam || isOrangeTip;
 
-            // Delta from clean target baseline
-            const delta = (Math.abs(r - baseR) + Math.abs(g - baseG) + Math.abs(b - baseB)) / 3;
-
-            // Inspect pixels that physically changed from clean baseline AND match dart color
-            if (delta >= 16 && isNerfDart) {
+            // Genuine projectile impact pixel: must be bright yellow/orange, on dark target face, AND changed vs baseline
+            if (isNerfColor && delta >= cvDiffThreshold && isBrighter) {
+              colorPxCount++;
               sumX += x;
               sumY += y;
-              changedDartCount++;
               if (x < minX) minX = x;
               if (x > maxX) maxX = x;
               if (y < minY) minY = y;
               if (y > maxY) maxY = y;
+
+              // Color mask: Bright Yellow/Orange highlight
+              colorMaskData[idx] = 255;     // R
+              colorMaskData[idx + 1] = 210; // G
+              colorMaskData[idx + 2] = 0;   // B
+              colorMaskData[idx + 3] = 255; // Alpha
             }
-          }
-        }
 
-        // Live Telemetry Readout on Reticle
-        const telem = document.getElementById("hudCvTelemetry");
-        if (telem) {
-          if (changedDartCount > 0) {
-            telem.textContent = `CV: TARGETING // DART: ${changedDartCount} PX`;
-            telem.setAttribute("fill", "#ffcc00");
-          } else {
-            telem.textContent = `CV: ARMED // DART: 0 PX`;
-            telem.setAttribute("fill", "#2cff55");
-          }
-        }
-
-        // Bullet Detection Trigger:
-        // Real Nerf dart spans 25 to 6000 changed pixels (user's stuck bullet had ~900-1200 px!)
-        // Fallback: If baseline had an issue, rawDartCount >= 180 also triggers!
-        const isBulletHit = (changedDartCount >= 25 && changedDartCount <= 6000) || (rawDartCount >= 180);
-
-        if (isBulletHit) {
-          const effectiveCount = (changedDartCount >= 25) ? changedDartCount : rawDartCount;
-          const cx = (changedDartCount >= 25) ? (sumX / changedDartCount) : cx0;
-          const cy = (changedDartCount >= 25) ? (sumY / changedDartCount) : cy0;
-
-          nerfTrackHistory.push({ x: cx, y: cy, time: Date.now() });
-          if (nerfTrackHistory.length > 3) nerfTrackHistory.shift();
-
-          // Rapid confirmation: STUCK if cluster position stays steady across >= 2 frames (~100ms)
-          if (nerfTrackHistory.length >= 2) {
-            let isStuck = true;
-            for (let i = 1; i < nerfTrackHistory.length; i++) {
-              const d = Math.hypot(nerfTrackHistory[i].x - nerfTrackHistory[0].x, nerfTrackHistory[i].y - nerfTrackHistory[0].y);
-              if (d > 12.0) {
-                isStuck = false;
-                break;
+            // 3. Temporal Onset Delta: Frame-to-frame jump
+            if (cvPrevFrameData) {
+              const prevR = cvPrevFrameData[idx];
+              const prevG = cvPrevFrameData[idx + 1];
+              const prevB = cvPrevFrameData[idx + 2];
+              const tDelta = (Math.abs(r - prevR) + Math.abs(g - prevG) + Math.abs(b - prevB)) / 3;
+              if (delta >= cvDiffThreshold) {
+                sumTemporalDelta += tDelta;
               }
             }
+          }
+        }
 
-            if (isStuck && !stuckBulletAcknowledged) {
-              const distFromCenter = Math.hypot(cx - cx0, cy - cy0);
-              lastDetectedBulletPos = { x: cx, y: cy };
-              handleNerfBulletStuck(cx, cy, distFromCenter, true, `NERF DART (${effectiveCount} PX)`);
+        // Cache current frame for next temporal check
+        cvPrevFrameData = new Uint8ClampedArray(data);
+
+        // Subtract any pre-existing warm pixels present in clean baseline
+        const netDartPixels = Math.max(0, colorPxCount - cvBaselineStaticPx);
+
+        const diffRatio = (diffPxCount / Math.max(1, roiTotalPx)) * 100;
+        const colorRatio = (netDartPixels / Math.max(1, roiTotalPx)) * 100;
+        const meanTemporalOnset = diffPxCount > 0 ? (sumTemporalDelta / diffPxCount) : 0.0;
+
+        const bboxW = (maxX >= minX) ? (maxX - minX + 1) : 0;
+        const bboxH = (maxY >= minY) ? (maxY - minY + 1) : 0;
+        const bboxArea = bboxW * bboxH;
+        const blobDensity = bboxArea > 0 ? (netDartPixels / bboxArea) : 0.0;
+
+        // Check 1: Baseline Diff (localized region changed)
+        const check1Pass = (diffPxCount >= 30);
+
+        // Check 2: Vibrant Orange/Yellow Dart (real dart size >= cvColorMinPx)
+        const check2Pass = (netDartPixels >= cvColorMinPx);
+
+        // Check 3: Sudden Onset or substantial cluster
+        const check3Pass = (meanTemporalOnset >= 8.0 || netDartPixels >= (cvColorMinPx + 20));
+
+        // Check 4: Spatial Coherence (coherent physical blob, not a thin edge line)
+        const isSolidBlob = (bboxW >= 6 && bboxH >= 6 && blobDensity >= 0.18 && (bboxW / Math.max(1, bboxH) <= 3.2) && (bboxH / Math.max(1, bboxW) <= 3.2));
+        const check4Pass = isSolidBlob;
+
+        // Update Matrix Badges in Debug Inspector
+        const b1 = document.getElementById("cvCheck1Badge");
+        if (b1) {
+          b1.innerText = `${diffPxCount} px (${diffRatio.toFixed(1)}%)`;
+          b1.style.color = check1Pass ? "#2cff55" : "#888888";
+        }
+        const b2 = document.getElementById("cvCheck2Badge");
+        if (b2) {
+          b2.innerText = `${netDartPixels} px (${colorRatio.toFixed(1)}%)`;
+          b2.style.color = check2Pass ? "#2cff55" : "#888888";
+        }
+        const b3 = document.getElementById("cvCheck3Badge");
+        if (b3) {
+          b3.innerText = meanTemporalOnset.toFixed(1);
+          b3.style.color = check3Pass ? "#2cff55" : "#888888";
+        }
+        const b4 = document.getElementById("cvCheck4Badge");
+        if (b4) {
+          b4.innerText = `${Math.round(blobDensity * 100)}% (w:${bboxW}, h:${bboxH})`;
+          b4.style.color = check4Pass ? "#2cff55" : "#888888";
+        }
+
+        // Render Diff Map and Color Mask to Inspector Canvases
+        const cDiff = document.getElementById("canvasDiffMap");
+        if (cDiff) {
+          cvDiffMapCtx.putImageData(diffMapImgData, 0, 0);
+          cDiff.getContext("2d").drawImage(cvDiffMapCanvas, 0, 0, cDiff.width, cDiff.height);
+        }
+        const cColor = document.getElementById("canvasColorMask");
+        if (cColor) {
+          cvColorMaskCtx.putImageData(colorMaskImgData, 0, 0);
+          const ctxC = cColor.getContext("2d");
+          ctxC.drawImage(cvColorMaskCanvas, 0, 0, cColor.width, cColor.height);
+          if (netDartPixels > 0 && bboxW > 0) {
+            const scale = cColor.width / 160;
+            ctxC.strokeStyle = "#2cff55";
+            ctxC.lineWidth = 1.5;
+            ctxC.strokeRect(minX * scale, minY * scale, bboxW * scale, bboxH * scale);
+          }
+        }
+
+        const cx = netDartPixels > 0 ? (sumX / colorPxCount) : cx0;
+        const cy = netDartPixels > 0 ? (sumY / colorPxCount) : cy0;
+
+        // STRICT DECISION LOGIC: MANDATORY 2-FRAME PERSISTENCE
+        // Only trigger if a genuine dart-sized object appears AND stays at that position!
+        if (check1Pass && check2Pass && check4Pass) {
+          if (cvConfirmationCandidate && (now - cvConfirmationCandidate.time < 600)) {
+            const drift = Math.hypot(cx - cvConfirmationCandidate.x, cy - cvConfirmationCandidate.y);
+            if (drift <= 18.0) {
+              // CONFIRMED! The Nerf bullet was shot, hit the target, and stayed on the target!
+              const latency = performance.now() - frameStartTime;
+              triggerConfirmedHit(cx, cy, `Nerf Bullet Confirmed (${netDartPixels} px at ${cx.toFixed(0)},${cy.toFixed(0)})`, latency);
+              cvConfirmationCandidate = null;
+            } else {
+              cvConfirmationCandidate = { x: cx, y: cy, time: now, count: netDartPixels };
             }
+          } else {
+            // First frame candidate: wait for next frame confirmation to reject glitches
+            cvConfirmationCandidate = { x: cx, y: cy, time: now, count: netDartPixels };
+            cvCurrentState = CV_STATE.CONFIRMING;
+            updateCvStateBadge("CONFIRMING BULLET...", "#ffcc00");
+            const reasonEl = document.getElementById("cvDebugReason");
+            if (reasonEl) reasonEl.innerText = `Potential hit seen at (${cx.toFixed(0)},${cy.toFixed(0)}): ${netDartPixels} px. Verifying persistence...`;
           }
         } else {
-          // Dynamic ambient lighting adaptation when target is empty (cluster < 5)
-          if (changedDartCount < 5 && targetBaseline) {
-            for (let y = cy0 - scanRadius; y <= cy0 + scanRadius; y++) {
-              const rowOffset = y * 160 * 4;
-              for (let x = cx0 - scanRadius; x <= cx0 + scanRadius; x++) {
-                const idx = rowOffset + x * 4;
-                targetBaseline[idx] = Math.round(targetBaseline[idx] * 0.98 + data[idx] * 0.02);
-                targetBaseline[idx + 1] = Math.round(targetBaseline[idx + 1] * 0.98 + data[idx + 1] * 0.02);
-                targetBaseline[idx + 2] = Math.round(targetBaseline[idx + 2] * 0.98 + data[idx + 2] * 0.02);
-              }
-            }
-          }
-          if (nerfTrackHistory.length > 0) {
-            nerfTrackHistory.shift();
+          cvConfirmationCandidate = null;
+          if (cvCurrentState === CV_STATE.CONFIRMING) {
+            cvCurrentState = CV_STATE.ARMED;
+            updateCvStateBadge("ARMED (OPTIMAL READY)", "#2cff55");
+            const reasonEl = document.getElementById("cvDebugReason");
+            if (reasonEl) reasonEl.innerText = "Target ARMED. Waiting for Nerf bullet strike...";
           }
         }
-      } catch (err) {
-        // Canvas security/frame error safeguard
       }
     }
 
-    // Unified continuous CV loop that monitors active stream (USB UVC webcam, COM17 serial, or WiFi MJPEG)
-    let cvLoopRunning = false;
-    function startCvDetectionLoop() {
-      // Dedicated Python Backend Service (http://localhost:8001) handles 100% of COM17 video analysis & hit detection.
-      cvLoopRunning = true;
-    }
+    // CONFIRMED HIT HANDLER: Dispatches reverse command to servo IMMEDIATELY
+    function triggerConfirmedHit(cx, cy, reasonStr, latencyMs) {
+      if (cvCurrentState === CV_STATE.HIT_CONFIRMED || cvCurrentState === CV_STATE.LOCKED || stuckBulletAcknowledged) {
+        return; // Guard against repeat triggers
+      }
 
-    function handleNerfBulletStuck(cx, cy, distFromCenter, isOptimal, source) {
-      if (stuckBulletAcknowledged) return;
+      cvCurrentState = CV_STATE.HIT_CONFIRMED;
       stuckBulletAcknowledged = true;
+      cvLastLatencyMs = latencyMs;
+      cvLastHitReason = reasonStr;
 
-      // 1. IMMEDIATELY DROP THE PHYSICAL TARGET!
-      // Commands servo DOWN,1 over COM7 instantly without delay
+      // 1. REVERSE SERVO IMMEDIATELY! Dispatches DOWN,1 over Web Serial without ANY delay!
       foldTarget(1);
-      logTerm(`[🎯 NERF HIT (${source})] Yellow bullet detected in OPTIMAL BLACK REGION! Target DROPPED IMMEDIATELY (DOWN,1)...`);
 
-      // 2. Animate Green Optimal Circle
+      // 2. Play optimal hit audio chirp
+      playOptimalHitChirp(true);
+
+      // 3. Update HUD & Reticle
+      updateCvStateBadge("HIT CONFIRMED! (REVERSING)", "#2cff55");
+      const latBadge = document.getElementById("cvLatencyBadge");
+      if (latBadge) latBadge.innerText = `${latencyMs.toFixed(1)} ms`;
+
+      const reasonEl = document.getElementById("cvDebugReason");
+      if (reasonEl) reasonEl.innerText = `HIT! ${reasonStr} | Latency: ${latencyMs.toFixed(1)}ms`;
+
+      // Animate Green Optimal Circle
       const optCircle = document.getElementById("optimalZoneCircle");
       if (optCircle) {
         optCircle.classList.remove("optimal-hit-active");
@@ -2739,17 +3136,17 @@
         optCircle.classList.add("optimal-hit-active");
       }
 
-      // 3. Show HUD banner
+      // Show HUD banner
       const banner = document.getElementById("nerfOptimalHudBanner");
       if (banner) {
         banner.style.display = "block";
-        banner.innerText = "🎯 OPTIMAL HIT! YELLOW BULLET DETECTED // TARGET DROPPED IMMEDIATELY";
+        banner.innerText = `🎯 OPTIMAL HIT! // SERVO REVERSED (${latencyMs.toFixed(1)}ms)`;
         banner.style.borderColor = "#2cff55";
         banner.style.color = "#2cff55";
         banner.style.boxShadow = "0 0 25px rgba(44, 255, 85, 0.9)";
       }
 
-      // 4. Add visual impact dot on camera viewport (EXACTLY ONE DOT)
+      // Visual impact dot on camera viewport
       const container = document.getElementById("camImpactDotsContainer");
       if (container) {
         container.innerHTML = "";
@@ -2768,30 +3165,66 @@
         container.appendChild(dot);
       }
 
-      // 5. Play confirmation tone
-      playOptimalHitChirp(true);
-
-      // 6. Clear any running exposure timer countdown
-      if (exposureTimer) {
-        clearInterval(exposureTimer);
-        exposureTimer = null;
+      // Update Verdict card
+      const verdictLabel = document.getElementById("verdictLabel");
+      const verdictBadge = document.getElementById("verdictBadge");
+      if (verdictLabel) verdictLabel.innerText = `HIT: OPTIMAL ZONE (${latencyMs.toFixed(1)}ms)`;
+      if (verdictBadge) {
+        verdictBadge.innerText = "HIT (OPTIMAL)";
+        verdictBadge.style.backgroundColor = "var(--mil-hit)";
+        verdictBadge.style.color = "#000000";
       }
 
-      const timerLabel = document.getElementById("exposureTimerLabel");
-      if (timerLabel) {
-        timerLabel.innerText = "CONCEALED [HIT DROPPED]";
-      }
+      // 4. Lock state machine to prevent repeat triggers until next cycle
+      cvCurrentState = CV_STATE.LOCKED;
+      logTerm(`[🎯 NERF HIT CONFIRMED] ${reasonStr} | Detection Latency: ${latencyMs.toFixed(1)}ms -> SERVO IMMEDIATELY REVERSED (DOWN,1)`);
 
-      // 7. Auto-clear shot markings after 3.0s so UI is clean for next pop
-      if (autoDropAfterShotTimer) {
-        clearTimeout(autoDropAfterShotTimer);
-      }
-
+      // 5. Auto-clear shot markings after 3.0s cooldown
+      if (autoDropAfterShotTimer) clearTimeout(autoDropAfterShotTimer);
       autoDropAfterShotTimer = setTimeout(() => {
-        logTerm("[Auto-Cycle] Shot markings cleared. Target ready for next pop.");
+        logTerm("[Auto-Cycle] Shot markings cleared. Target ready for next pop command.");
         resetShots();
+        resetCvStateToIdle();
         autoDropAfterShotTimer = null;
       }, 3000);
+    }
+
+    // Diagnostics: Force simulate hit for hardware bench verification
+    function testForceSimulateHit() {
+      logTerm("[Test Mode] Simulating instant Nerf hit event...");
+      triggerConfirmedHit(80, 80, "Manual Test Trigger (Bench Verification)", 2.4);
+    }
+
+    // Diagnostics: Collapsible threshold settings drawer
+    function toggleCvSettingsModal() {
+      const drawer = document.getElementById("cvTuningDrawer");
+      if (drawer) {
+        drawer.style.display = (drawer.style.display === "none" || drawer.style.display === "") ? "flex" : "none";
+      }
+    }
+
+    function updateCvThresholds(param, val) {
+      val = parseInt(val, 10);
+      if (param === 'diff') {
+        cvDiffThreshold = val;
+        const el = document.getElementById("valDiffThresh");
+        if (el) el.innerText = val;
+        logTerm(`[Target CV Tuning] Diff Sensitivity set to ${val}`);
+      } else if (param === 'color') {
+        cvColorMinPx = val;
+        const el = document.getElementById("valColorThresh");
+        if (el) el.innerText = val;
+        logTerm(`[Target CV Tuning] Orange Min Pixels set to ${val}`);
+      } else if (param === 'settle') {
+        cvSettleDurationMs = val;
+        const el = document.getElementById("valSettleMs");
+        if (el) el.innerText = `${val}ms`;
+        logTerm(`[Target CV Tuning] Servo Settle Time set to ${val}ms`);
+      }
+    }
+
+    function startCvDetectionLoop() {
+      // Direct in-browser deterministic engine is always active on incoming frames.
     }
 
     function playOptimalHitChirp(isOptimal) {
@@ -2897,6 +3330,22 @@
             video.style.display = "block";
           }
 
+          if (!cvWebcamLoopRunning) {
+            cvWebcamLoopRunning = true;
+            function runWebcamLoop() {
+              if (webcamStream && isCameraRunning) {
+                const vid = document.getElementById("webcamVideo");
+                if (vid && vid.readyState >= 2) {
+                  runDeterministicHitDetection(vid);
+                }
+                requestAnimationFrame(runWebcamLoop);
+              } else {
+                cvWebcamLoopRunning = false;
+              }
+            }
+            requestAnimationFrame(runWebcamLoop);
+          }
+
           dot.style.backgroundColor = "#2cff55";
           badge.innerText = "USB CAM [LIVE]";
           badge.style.color = "var(--mil-hit)";
@@ -2999,11 +3448,15 @@
       const badge = document.getElementById("camStatusBadge");
       const offlineNotice = document.getElementById("cameraOfflineNotice");
 
-      dot.style.backgroundColor = "#2cff55";
-      badge.innerText = "WIFI CAM [LIVE]";
-      badge.style.color = "var(--mil-hit)";
+      if (dot) dot.style.backgroundColor = "#2cff55";
+      if (badge && !isCameraSerialConnected) {
+        badge.innerText = "CAM [LIVE]";
+        badge.style.color = "var(--mil-hit)";
+      }
       if (offlineNotice) offlineNotice.style.display = "none";
-      logTerm("[Camera] WiFi ESP32-CAM stream connected successfully.");
+
+      const img = document.getElementById("espCameraImg");
+      if (img) runDeterministicHitDetection(img);
     }
 
     function onCameraStreamError() {

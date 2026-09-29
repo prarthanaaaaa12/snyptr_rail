@@ -58,10 +58,10 @@ static const char *TAG = "P4_UART_STREAM";
 #define I2C_MASTER_SDA_IO   GPIO_NUM_7
 #define I2C_MASTER_NUM      I2C_NUM_0
 
-// UART Pin definitions for Bridge (GPIO 21 TX -> Pop-Up RX2, GPIO 22 RX -> Pop-Up TX2)
+// UART Pin definitions for Bridge (Using clean, isolated GPIO 21)
 #define BRIDGE_UART_NUM     UART_NUM_1
 #define BRIDGE_TX_PIN       GPIO_NUM_21
-#define BRIDGE_RX_PIN       GPIO_NUM_22
+#define BRIDGE_RX_PIN       GPIO_NUM_27
 #define BRIDGE_BAUD         115200
 
 #if !UART_DIAGNOSTIC_MODE
@@ -189,20 +189,65 @@ static void get_target_score(float target_x, float target_y, uint8_t *ring, uint
     }
 }
 
-// Background task to receive target homography calibration matrices over UART0
+// =========================================================================
+// STANDALONE DETERMINISTIC NERF PROJECTILE DETECTOR STATE & BUFFERS
+// =========================================================================
+typedef enum {
+    P4_STATE_IDLE = 0,
+    P4_STATE_SETTLING,
+    P4_STATE_CALIBRATING,
+    P4_STATE_ARMED,
+    P4_STATE_HIT_CONFIRMED,
+    P4_STATE_LOCKED
+} p4_state_t;
+
+static volatile p4_state_t g_p4_state = P4_STATE_ARMED; // Armed by default for instant readiness
+static int64_t g_p4_state_start_us = 0;
+static int64_t g_p4_cooldown_until_us = 0;
+
+#define NERF_GRID_SIZE 130
+static uint16_t s_p4_baseline_roi[NERF_GRID_SIZE][NERF_GRID_SIZE] = {0};
+static int s_p4_baseline_samples = 0;
+static int s_p4_confirm_frames = 0;
+
+// Background task to receive calibration and target pop commands over UART0
 static void uart_rx_task(void *arg)
 {
     uint8_t buffer[128];
     int idx = 0;
     int64_t last_byte_time = 0;
+    char text_cmd_buf[32];
+    int text_cmd_idx = 0;
     
-    ESP_LOGI("STANDALONE_CV", "UART RX Calibration task started...");
+    ESP_LOGI("STANDALONE_CV", "UART RX task started. Listening for calibration & pop commands...");
     
     while (1) {
         uint8_t byte;
         int len = uart_read_bytes(UART_NUM_0, &byte, 1, pdMS_TO_TICKS(10));
         if (len > 0) {
             int64_t now = esp_timer_get_time();
+            
+            // Check for ASCII text commands: UP, ARM, DOWN, STATUS
+            if (byte == '\n' || byte == '\r') {
+                if (text_cmd_idx > 0) {
+                    text_cmd_buf[text_cmd_idx] = '\0';
+                    if (strstr(text_cmd_buf, "UP") || strstr(text_cmd_buf, "ARM")) {
+                        g_p4_state = P4_STATE_SETTLING;
+                        g_p4_state_start_us = now;
+                        s_p4_baseline_samples = 0;
+                        s_p4_confirm_frames = 0;
+                        ESP_LOGI("P4_NERF", "🎯 Received UP/ARM command. Target settling for 650ms...");
+                    } else if (strstr(text_cmd_buf, "DOWN")) {
+                        g_p4_state = P4_STATE_IDLE;
+                        ESP_LOGI("P4_NERF", "Received DOWN command. Target idle.");
+                    }
+                    text_cmd_idx = 0;
+                }
+            } else if (text_cmd_idx < (int)sizeof(text_cmd_buf) - 1 && byte >= 32 && byte <= 126) {
+                text_cmd_buf[text_cmd_idx++] = (char)byte;
+            }
+
+            // Binary homography calibration packet parsing (0xCC 0x01 ...)
             if (idx > 0 && (now - last_byte_time > 100000)) { // 100ms packet timeout
                 idx = 0;
             }
@@ -373,209 +418,6 @@ static void set_camera_exposure_target(int value)
         ESP_LOGW("CAMERA", "Failed to set camera AE exposure target");
     }
 #endif
-}
-
-// --- EMBEDDED LIGHTWEIGHT MODEL: YELLOW NERF BULLET DETECTOR WITH BASELINE DIFFERENCING ---
-// Scans the ENTIRE BLACK OPTIMAL REGION (Center 400, 400, Radius 275 px on 800x800 frame -> matches r=55 on 160x160)
-#define NERF_ROI_SIZE 110 // 110x110 grid sampled with step 5 = 550x550 pixels (Center 400 +/- 275 px)
-static uint16_t s_nerf_baseline_roi[NERF_ROI_SIZE][NERF_ROI_SIZE] = {0};
-static int s_baseline_sample_count = 0;
-static bool s_baseline_ready = false;
-static int64_t s_hit_cooldown_until_us = 0;
-static uint32_t s_last_dart_pixel_count = 0;
-
-typedef struct {
-    float last_x;
-    float last_y;
-    int stable_frames;
-    bool is_stuck;
-    bool in_optimal_zone;
-} nerf_tracker_t;
-
-static nerf_tracker_t g_nerf_tracker = {0};
-
-static bool detect_yellow_nerf_bullet(const uint16_t *pixels, int width, int height,
-                                      float *out_x, float *out_y, bool *out_stuck, bool *out_optimal)
-{
-    int64_t now_us = esp_timer_get_time();
-
-    // Check if Pop-Up ESP32 sent "ARM,1" over TX2 -> P4 GPIO 22 when target popped UP
-    uint8_t bridge_rx_buf[32];
-    int rx_len = uart_read_bytes(BRIDGE_UART_NUM, bridge_rx_buf, sizeof(bridge_rx_buf) - 1, 0);
-    if (rx_len > 0) {
-        bridge_rx_buf[rx_len] = '\0';
-        if (strstr((const char *)bridge_rx_buf, "ARM") != NULL) {
-            // Wait 600ms for servo motion & mechanical wobble to stop before sampling upright baseline
-            s_hit_cooldown_until_us = now_us + 600000ULL;
-            s_baseline_ready = false;
-            s_baseline_sample_count = 0;
-            memset(&g_nerf_tracker, 0, sizeof(g_nerf_tracker));
-            ESP_LOGI("NERF_CV", "🎯 Target Popped UP (ARM received) -> Re-zeroing baseline in 600ms!");
-            *out_stuck = false;
-            *out_optimal = false;
-            return false;
-        }
-    }
-
-    // If in post-hit or post-ARM settle window, wait until timer expires then re-calibrate clean baseline
-    if (s_hit_cooldown_until_us > 0) {
-        if (now_us < s_hit_cooldown_until_us) {
-            *out_stuck = false;
-            *out_optimal = false;
-            return false;
-        }
-        // Cooldown elapsed: clear shot and re-arm baseline for next pop
-        s_hit_cooldown_until_us = 0;
-        s_baseline_ready = false;
-        s_baseline_sample_count = 0;
-        memset(&g_nerf_tracker, 0, sizeof(g_nerf_tracker));
-        const char *clear_msg = "CLEAR,1\n";
-        uart_write_bytes(BRIDGE_UART_NUM, clear_msg, strlen(clear_msg));
-        ESP_LOGI("NERF_CV", "🔄 Cooldown Complete: Shot cleared, re-arming optimal black region baseline.");
-    }
-
-    // Auto-learn clean target baseline for the optimal black silhouette during first 8 frames
-    if (!s_baseline_ready) {
-        for (int gy = 0; gy < NERF_ROI_SIZE; gy++) {
-            int y = 125 + gy * 5; // Center 400 +/- 275 px
-            int row = y * width;
-            for (int gx = 0; gx < NERF_ROI_SIZE; gx++) {
-                int x = 125 + gx * 5;
-                s_nerf_baseline_roi[gy][gx] = pixels[row + x];
-            }
-        }
-        s_baseline_sample_count++;
-        if (s_baseline_sample_count >= 8) {
-            s_baseline_ready = true;
-            ESP_LOGI("NERF_CV", "🎯 Optimal Black Region Baseline Calibrated (r=275px)! Armed for yellow Nerf impact.");
-        }
-        *out_stuck = false;
-        *out_optimal = false;
-        return false;
-    }
-
-    uint32_t sum_x = 0;
-    uint32_t sum_y = 0;
-    uint32_t dart_changed_count = 0;
-
-    // Scan ENTIRE BLACK SILHOUETTE (Center 400, 400, Radius 275 pixels)
-    for (int gy = 0; gy < NERF_ROI_SIZE; gy++) {
-        int y = 125 + gy * 5;
-        int dy = y - 400;
-        int row = y * width;
-
-        for (int gx = 0; gx < NERF_ROI_SIZE; gx++) {
-            int x = 125 + gx * 5;
-            int dx = x - 400;
-
-            if (dx * dx + dy * dy > 275 * 275) {
-                continue; // Strictly within optimal black region circle
-            }
-
-            uint16_t p = pixels[row + x];
-            uint16_t base = s_nerf_baseline_roi[gy][gx];
-
-            // Convert RGB565 to 8-bit RGB888 equivalents (0..255)
-            int r8 = ((p >> 11) & 0x1F) * 8;
-            int g8 = ((p >> 5) & 0x3F) * 4;
-            int b8 = (p & 0x1F) * 8;
-
-            int br8 = ((base >> 11) & 0x1F) * 8;
-            int bg8 = ((base >> 5) & 0x3F) * 4;
-            int bb8 = (base & 0x1F) * 8;
-
-            // 1. Baseline pixel MUST have been part of the DARK/BLACK target silhouette (not bright background wall!)
-            bool base_was_black_target = (br8 <= 115 && bg8 <= 115 && bb8 <= 115);
-
-            // 2. Current pixel MUST be bright Yellow/Orange Nerf foam/tip
-            bool is_nerf_dart = (
-                r8 >= 135 &&
-                b8 <= 70 &&
-                (r8 - b8) >= 65 &&
-                g8 >= 50 &&
-                (g8 - b8) >= 20 &&
-                r8 >= (g8 - 20)
-            );
-
-            int delta = (abs(r8 - br8) + abs(g8 - bg8) + abs(b8 - bb8)) / 3;
-
-            // Only count pixels that transitioned from BLACK target -> BRIGHT YELLOW/ORANGE Nerf dart!
-            if (base_was_black_target && delta >= 35 && is_nerf_dart) {
-                sum_x += x;
-                sum_y += y;
-                dart_changed_count++;
-            }
-        }
-    }
-
-    s_last_dart_pixel_count = dart_changed_count;
-
-    // Trigger ONLY on genuine changed Black->Yellow Nerf bullet cluster (35..6000 grid points)
-    // (Removed raw_dart_count fallback so static background yellow objects NEVER false-trigger!)
-    bool is_bullet_hit = (dart_changed_count >= 35 && dart_changed_count <= 6000);
-
-    if (is_bullet_hit) {
-        uint32_t active_cnt = dart_changed_count;
-        float cx = (float)sum_x / (float)dart_changed_count;
-        float cy = (float)sum_y / (float)dart_changed_count;
-        *out_x = cx;
-        *out_y = cy;
-
-        float dx = cx - g_nerf_tracker.last_x;
-        float dy = cy - g_nerf_tracker.last_y;
-        float shift = sqrtf(dx * dx + dy * dy);
-
-        if (shift <= 45.0f) {
-            g_nerf_tracker.stable_frames++;
-        } else {
-            g_nerf_tracker.stable_frames = 1;
-        }
-
-        g_nerf_tracker.last_x = cx;
-        g_nerf_tracker.last_y = cy;
-
-        // Confirm STUCK in >= 2 consecutive frames (~100ms) for immediate drop reaction
-        bool stuck = (g_nerf_tracker.stable_frames >= 2);
-        g_nerf_tracker.is_stuck = stuck;
-        g_nerf_tracker.in_optimal_zone = stuck;
-
-        *out_stuck = stuck;
-        *out_optimal = stuck;
-
-        if (stuck) {
-            // Send HIT telemetry FIRST, then DOWN,1 to drop the servo!
-            char hit_telemetry[64];
-            int hlen = snprintf(hit_telemetry, sizeof(hit_telemetry), "HIT,1,%.0f,%.0f,%lu\n",
-                                cx, cy, (unsigned long)active_cnt);
-            uart_write_bytes(BRIDGE_UART_NUM, hit_telemetry, hlen);
-
-            const char *drop_cmd = "DOWN,1\n";
-            uart_write_bytes(BRIDGE_UART_NUM, drop_cmd, strlen(drop_cmd));
-
-            // Start 3.0s lock before auto-clearing
-            s_hit_cooldown_until_us = now_us + 3000000ULL;
-        }
-
-        return true;
-    } else {
-        // Adapt baseline slowly for ambient lighting when empty
-        if (dart_changed_count < 5 && s_baseline_ready) {
-            for (int gy = 0; gy < NERF_ROI_SIZE; gy++) {
-                int y = 125 + gy * 5;
-                int row = y * width;
-                for (int gx = 0; gx < NERF_ROI_SIZE; gx++) {
-                    int x = 125 + gx * 5;
-                    s_nerf_baseline_roi[gy][gx] = pixels[row + x];
-                }
-            }
-        }
-        if (g_nerf_tracker.stable_frames > 0) {
-            g_nerf_tracker.stable_frames--;
-        }
-        *out_stuck = false;
-        *out_optimal = false;
-        return false;
-    }
 }
 
 // Camera Capture and Stream Task
@@ -786,139 +628,143 @@ static void camera_stream_task(void *arg)
             uint32_t out_len = buf.bytesused;
 
             if (frame_ptr != NULL && out_len > 0) {
-                // Dynamically manage camera exposure based on calibration state
-                static bool s_was_calibrated = false;
-                if (g_is_calibrated != s_was_calibrated) {
-                    s_was_calibrated = g_is_calibrated;
-                    if (g_is_calibrated) {
-                        // Dim camera (AE target = 15) to prevent laser saturation on the white card
-                        set_camera_exposure_target(15);
-                    } else {
-                        // Restore normal brightness (AE target = 60) for target scanning
-                        set_camera_exposure_target(60);
-                    }
+                // Keep camera exposure balanced for vibrant yellow foam and orange tip detection
+                static bool s_cam_exposure_set = false;
+                if (!s_cam_exposure_set) {
+                    set_camera_exposure_target(65);
+                    s_cam_exposure_set = true;
                 }
 
-                // --- STANDALONE COMPUTER VISION PIPELINE ---
-                int best_x = -1;
-                int best_y = -1;
-                int best_score = -100;
-                
+                // =========================================================================
+                // STANDALONE DETERMINISTIC NERF PROJECTILE DETECTOR FOR ESP32-P4
+                // =========================================================================
+                int64_t now_us = esp_timer_get_time();
                 uint16_t *pixels = (uint16_t *)frame_ptr;
-                // Scan every 2nd pixel for speed (scans 160,000 pixels in ~1ms)
-                for (int y = 4; y < 796; y += 2) {
-                    for (int x = 4; x < 796; x += 2) {
-                        uint16_t pixel = pixels[y * 800 + x];
-                        int r = (pixel >> 11) & 0x1F;
-                        int g = (pixel >> 5) & 0x3F;
-                        int b = pixel & 0x1F;
-                        
-                        int g_norm = g >> 1; // Normalize green (6-bit) to 5-bit
-                        int score = r * 2 - g_norm - b; // High-pass red difference
-                        
-                        // Adaptive thresholding: Use threshold of 12 in white circle (high green/blue) and 18 in dark/background areas
-                        int thresh = (g_norm > 15 && b > 15) ? 12 : 18;
-                        if (score >= thresh) {
-                            int relative_score = score - thresh;
-                            if (relative_score > best_score) {
-                                best_score = relative_score;
-                                best_x = x;
-                                best_y = y;
+
+                // 1. Post-hit cooldown timer
+                if (g_p4_cooldown_until_us > 0) {
+                    if (now_us >= g_p4_cooldown_until_us) {
+                        g_p4_cooldown_until_us = 0;
+                        g_p4_state = P4_STATE_ARMED;
+                        s_p4_baseline_samples = 0;
+                        s_p4_confirm_frames = 0;
+                        ESP_LOGI("P4_NERF", "🔄 Cooldown elapsed. Target ARMED for next shot.");
+                    }
+                }
+
+                // 2. Target Settle Timer: wait 650ms after UP command to reject servo swing
+                if (g_p4_state == P4_STATE_SETTLING) {
+                    if (now_us - g_p4_state_start_us >= 650000ULL) {
+                        g_p4_state = P4_STATE_CALIBRATING;
+                        s_p4_baseline_samples = 0;
+                        ESP_LOGI("P4_NERF", "Settle complete. Establishing clean black target baseline...");
+                    }
+                }
+
+                // 3. Baseline Acquisition: Multi-frame average of stationary black target ROI
+                if (g_p4_state == P4_STATE_CALIBRATING || s_p4_baseline_samples < 6) {
+                    for (int gy = 0; gy < NERF_GRID_SIZE; gy++) {
+                        int y = 140 + gy * 4;
+                        int row = y * 800;
+                        for (int gx = 0; gx < NERF_GRID_SIZE; gx++) {
+                            int x = 140 + gx * 4;
+                            s_p4_baseline_roi[gy][gx] = pixels[row + x];
+                        }
+                    }
+                    s_p4_baseline_samples++;
+                    if (s_p4_baseline_samples >= 6) {
+                        g_p4_state = P4_STATE_ARMED;
+                        ESP_LOGI("P4_NERF", "🎯 Clean black target baseline established! ARMED for orange/yellow impact.");
+                    }
+                }
+
+                bool hit_confirmed = false;
+                int best_x = 400;
+                int best_y = 400;
+
+                // 4. ARMED State: 4-Check Deterministic Event Detection on Optimal ROI
+                if (g_p4_state == P4_STATE_ARMED) {
+                    int diff_count = 0;
+                    int color_count = 0;
+                    uint32_t sum_x = 0;
+                    uint32_t sum_y = 0;
+                    int min_x = 800, max_x = 0, min_y = 800, max_y = 0;
+
+                    // Scan optimal circular ROI (Center 400, 400, Radius 260px)
+                    for (int gy = 0; gy < NERF_GRID_SIZE; gy++) {
+                        int y = 140 + gy * 4;
+                        int dy = y - 400;
+                        int row = y * 800;
+
+                        for (int gx = 0; gx < NERF_GRID_SIZE; gx++) {
+                            int x = 140 + gx * 4;
+                            int dx = x - 400;
+                            if (dx * dx + dy * dy > 260 * 260) continue;
+
+                            uint16_t p = pixels[row + x];
+                            uint16_t base = s_p4_baseline_roi[gy][gx];
+
+                            // Extract RGB components (0..255 range)
+                            int r = ((p >> 11) & 0x1F) * 8;
+                            int g = ((p >> 5) & 0x3F) * 4;
+                            int b = (p & 0x1F) * 8;
+
+                            int br = ((base >> 11) & 0x1F) * 8;
+                            int bg = ((base >> 5) & 0x3F) * 4;
+                            int bb = (base & 0x1F) * 8;
+
+                            // Check 1: Baseline difference
+                            int delta = (abs(r - br) + abs(g - bg) + abs(b - bb)) / 3;
+                            bool base_was_dark = (br <= 110 && bg <= 110 && bb <= 110);
+
+                            if (delta >= 22) diff_count++;
+
+                            // Check 2: Nerf Orange/Yellow Chromatic Spectrum
+                            bool is_nerf = (r >= 105 && b <= 75 && (r - b) >= 38 && 
+                                            (r + g) >= ((b + 1) * 2) && (g - b) >= 10 && r >= (g - 28));
+
+                            // Genuine projectile transition: dark baseline -> bright orange/yellow
+                            if (is_nerf && delta >= 18 && base_was_dark) {
+                                color_count++;
+                                sum_x += x;
+                                sum_y += y;
+                                if (x < min_x) min_x = x;
+                                if (x > max_x) max_x = x;
+                                if (y < min_y) min_y = y;
+                                if (y > max_y) max_y = y;
                             }
                         }
                     }
-                }
-                
-                bool laser_found = (best_score >= 0); // Exceeded adaptive threshold if relative_score >= 0
-                double laser_x = best_x;
-                double laser_y = best_y;
-                
-                if (laser_found) {
-                    // Refine coordinates using 9x9 centroid around the peak
-                    double sum_x = 0;
-                    double sum_y = 0;
-                    double sum_w = 0;
-                    for (int dy = -4; dy <= 4; dy++) {
-                        for (int dx = -4; dx <= 4; dx++) {
-                            int px = best_x + dx;
-                            int py = best_y + dy;
-                            if (px >= 0 && px < 800 && py >= 0 && py < 800) {
-                                uint16_t p = pixels[py * 800 + px];
-                                int r = (p >> 11) & 0x1F;
-                                int g = (p >> 5) & 0x3F;
-                                int b = p & 0x1F;
-                                int g_norm = g >> 1;
-                                int w = r * 2 - g_norm - b;
-                                int min_w = (g_norm > 15 && b > 15) ? 8 : 10;
-                                if (w >= min_w) {
-                                    sum_x += px * w;
-                                    sum_y += py * w;
-                                    sum_w += w;
-                                }
-                            }
-                        }
-                    }
-                    if (sum_w > 0) {
-                        laser_x = sum_x / sum_w;
-                        laser_y = sum_y / sum_w;
-                    }
-                }
-                
-                // Homography mapping and scoring calculations
-                float target_x = 0.0f;
-                float target_y = 0.0f;
-                float distance = 0.0f;
-                uint8_t ring = 0;
-                uint8_t zone = 0;
-                
-                bool valid_laser_on_card = false;
-                if (laser_found && g_is_calibrated) {
-                    float h00 = g_homography[0];
-                    float h01 = g_homography[1];
-                    float h02 = g_homography[2];
-                    float h10 = g_homography[3];
-                    float h11 = g_homography[4];
-                    float h12 = g_homography[5];
-                    float h20 = g_homography[6];
-                    float h21 = g_homography[7];
-                    float h22 = g_homography[8];
-                    
-                    double denom = h20 * laser_x + h21 * laser_y + h22;
-                    if (fabs(denom) > 1e-5) {
-                        target_x = (h00 * laser_x + h01 * laser_y + h02) / denom;
-                        target_y = (h10 * laser_x + h11 * laser_y + h12) / denom;
-                        
-                        // Limit detection to target card boundary (50x50mm target, strict 0mm margin to ignore table reflections)
-                        if (target_x >= 0.0f && target_x <= 50.0f && target_y >= 0.0f && target_y <= 50.0f) {
-                            valid_laser_on_card = true;
-                        }
-                    }
-                    
-                    get_target_score(target_x, target_y, &ring, &zone, &distance);
-                }
 
-                // --- RUN EMBEDDED YELLOW NERF BULLET DETECTOR ---
-                float nerf_x = 0.0f, nerf_y = 0.0f;
-                bool nerf_stuck = false, nerf_optimal = false;
-                bool nerf_detected = detect_yellow_nerf_bullet(pixels, 800, 800, &nerf_x, &nerf_y, &nerf_stuck, &nerf_optimal);
+                    // Check 4: Spatial Coherence / Clustering
+                    int bbox_w = (max_x >= min_x) ? (max_x - min_x + 1) : 0;
+                    int bbox_h = (max_y >= min_y) ? (max_y - min_y + 1) : 0;
+                    int area = (bbox_w / 4) * (bbox_h / 4);
+                    float density = area > 0 ? ((float)color_count / area) : 0.0f;
 
-                if (nerf_detected && nerf_stuck) {
-                    valid_laser_on_card = true;
-                    laser_x = nerf_x;
-                    laser_y = nerf_y;
-                    if (nerf_optimal) {
-                        zone = 1; // Green Optimal Zone
-                        ring = 11; // 10X Bullseye
+                    // Multi-check confirmation: coherent blob of >= 18 grid points
+                    if (color_count >= 18 && density >= 0.12f && bbox_w >= 16 && bbox_h >= 16) {
+                        if (color_count >= 32 || s_p4_confirm_frames >= 1) {
+                            hit_confirmed = true;
+                            best_x = color_count > 0 ? (int)(sum_x / color_count) : 400;
+                            best_y = color_count > 0 ? (int)(sum_y / color_count) : 400;
+
+                            // DISPATCH IMMEDIATE REVERSE COMMAND TO SERVO!
+                            const char *down_cmd = "DOWN,1\n";
+                            uart_write_bytes(BRIDGE_UART_NUM, down_cmd, strlen(down_cmd));
+                            uart_write_bytes(UART_NUM_0, down_cmd, strlen(down_cmd));
+
+                            ESP_LOGI("P4_NERF", "🎯 NERF HIT CONFIRMED! Dispatched DOWN,1 (color: %d px, density: %.0f%%) -> Servo Reversed!",
+                                     color_count, density * 100);
+
+                            g_p4_state = P4_STATE_LOCKED;
+                            g_p4_cooldown_until_us = now_us + 3000000ULL;
+                            s_p4_confirm_frames = 0;
+                        } else {
+                            s_p4_confirm_frames++;
+                        }
                     } else {
-                        zone = 2; // Outer Zone
-                        ring = 8;
-                    }
-                    static int64_t last_nerf_log = 0;
-                    int64_t now_us = esp_timer_get_time();
-                    if (now_us - last_nerf_log > 1000000) {
-                        last_nerf_log = now_us;
-                        ESP_LOGI("NERF_CV", "🎯 Yellow Nerf Bullet STUCK! Pos: (%.1f, %.1f) | Optimal Zone: %s",
-                                 nerf_x, nerf_y, nerf_optimal ? "YES (OPTIMAL GREEN BULLSEYE)" : "NO");
+                        if (s_p4_confirm_frames > 0) s_p4_confirm_frames--;
                     }
                 }
 
@@ -961,15 +807,15 @@ static void camera_stream_task(void *arg)
                         // Inject Trailing 32-byte Metadata Steganographically
                         shot_metadata_t meta = {
                             .magic = {0xDE, 0xAD, 0xBE, 0xEF},
-                            .laser_found = valid_laser_on_card ? 1 : 0,
-                            .zone = zone,
-                            .score_ring = ring,
-                            .is_calibrated = g_is_calibrated ? 1 : 0,
-                            .laser_x_px = (uint16_t)laser_x,
-                            .laser_y_px = (uint16_t)laser_y,
-                            .laser_x_mm = target_x,
-                            .laser_y_mm = target_y,
-                            .laser_dist_mm = distance
+                            .laser_found = (hit_confirmed || g_p4_state == P4_STATE_LOCKED) ? 1 : 0,
+                            .zone = 1,
+                            .score_ring = 10,
+                            .is_calibrated = (g_p4_state == P4_STATE_ARMED) ? 1 : 0,
+                            .laser_x_px = (uint16_t)best_x,
+                            .laser_y_px = (uint16_t)best_y,
+                            .laser_x_mm = 25.0f,
+                            .laser_y_mm = 25.0f,
+                            .laser_dist_mm = 0.0f
                         };
                         
                         // Append metadata immediately after the JPEG data

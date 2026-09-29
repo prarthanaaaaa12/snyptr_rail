@@ -60,48 +60,16 @@ try:
 except ImportError:
     HAS_SERIAL = False
 
-# =============================================================================
-# CONFIGURATION CONSTANTS (CALIBRATED ON REAL P4 CAMERA DART & TARGET IMAGES)
-# =============================================================================
+# Configuration Constants
 DEFAULT_P4_SERIAL_PORT = "COM17"
 DEFAULT_P4_BAUD_RATE = 3000000
 DEFAULT_WIFI_POP_URL = "http://192.168.4.1"
 API_PORT = 8001
 
-# Strict Multi-Space Thresholds for Yellow Nerf Dart + Orange Tip under P4 warm lens:
-# - Warm background wall has S ~ 110..145, Blue ~ 85..105, Ratio ~ 1.9
-# - Genuine Yellow Nerf Dart + Orange Tip has S >= 200, Blue <= 42, Ratio >= 4.0, b* >= 152
-DART_HUE_MIN = 8
-DART_HUE_MAX = 34
-DART_SAT_MIN = 200
-DART_BLUE_MAX = 42
-DART_RED_MIN = 115
-DART_GREEN_MIN = 80
-DART_CHROMATIC_RATIO_MIN = 4.0
-DART_LAB_B_MIN = 152
-
-# Sub-region signatures inside the dart contour:
-# 1. Yellow Foam Body (H: 19..34, S >= 200, B <= 42)
-# 2. Orange Dart Tip  (H: 8..20,  S >= 205, B <= 38, R - G >= 38)
-MIN_YELLOW_BODY_PX = 550
-MIN_ORANGE_TIP_PX = 120
-
-# Minimum percentage of dark/black target pixels required inside the target ROI circle
-# (Rejects false triggers when target is down and only bright warm wall is visible)
-MIN_BLACK_TARGET_ROI_RATIO = 0.15
-
-# Bullet Blob Size & Shape Validation (at 800x800 resolution)
-MIN_BULLET_AREA = 1200      # Genuine stuck dart is ~14,000 - 20,000 px at 800x800
-MAX_BULLET_AREA = 38000     # Maximum plausible bullet size at 800x800
-MIN_SOLIDITY = 0.55         # Bullet is a compact cylindrical/oval shape
-MIN_ASPECT_RATIO = 0.30
-MAX_ASPECT_RATIO = 3.20
-
-# Temporal Tracking Parameters
-STABILITY_REQUIRED_FRAMES = 3  # Must remain in position for 3 consecutive frames (~250ms)
-MAX_STATIONARY_DRIFT_PX = 18.0 # Drift allowed between consecutive frames to consider "stuck"
+# Cooldown and settling windows
 POST_HIT_COOLDOWN_SEC = 3.0    # Hold hit state for 3 seconds before auto-rearm
-POP_UP_SETTLE_WINDOW_SEC = 1.0 # Ignore visual transients during initial servo swing
+POP_UP_SETTLE_WINDOW_SEC = 0.65 # Settle window after target reaches upright position (650ms)
+BASELINE_FRAME_COUNT = 6       # Frames to average for stationary baseline
 
 # =============================================================================
 # GLOBAL SHARED STATE
@@ -111,13 +79,18 @@ class VisionState:
         self.lock = threading.Lock()
         self.current_frame_bgr: Optional[np.ndarray] = None
         self.annotated_frame_bgr: Optional[np.ndarray] = None
+        self.prev_frame_bgr: Optional[np.ndarray] = None
+        self.baseline_bgr: Optional[np.ndarray] = None
+        self.baseline_frames: List[np.ndarray] = []
+        self.baseline_ready = False
+        
         self.frame_id = 0
         self.fps = 0.0
         self.last_frame_time = time.time()
         
-        # Target state: "DOWN", "RISING", "UP_ARMED", "HIT"
-        self.target_state = "DOWN"
-        self.target_up_timestamp = 0.0
+        # Target state: "IDLE", "SETTLING", "CALIBRATING", "ARMED", "LOCKED"
+        self.target_state = "IDLE"
+        self.state_entered_time = time.time()
         
         # Detection results
         self.hit_active = False
@@ -129,8 +102,15 @@ class VisionState:
         self.hit_bullet_area = 0
         self.hit_confidence = 0.0
         
-        # Tracking history: list of (x, y, timestamp, area)
-        self.recent_bullet_positions: List[Tuple[float, float, float, int]] = []
+        # Check diagnostics
+        self.check1_diff_pass = False
+        self.check2_color_pass = False
+        self.check3_onset_pass = False
+        self.check4_blob_pass = False
+        self.latency_ms = 0.0
+        
+        # 2-frame candidate buffer for borderline hits
+        self.pending_candidate: Optional[Dict[str, Any]] = None
         
         # Calibrated Target Region (Center, Radius)
         self.target_center_px = (400, 400)
@@ -190,15 +170,16 @@ class WiFiPopUpController:
                     with g_state.lock:
                         g_state.wifi_pop_connected = True
                         new_state = data.get("targetState", g_state.target_state)
-                        if new_state == "UP" and g_state.target_state != "UP_ARMED" and not g_state.hit_active:
-                            g_state.target_state = "UP_ARMED"
-                            g_state.target_up_timestamp = time.time()
-                            g_state.hit_active = False
-                            g_state.recent_bullet_positions.clear()
-                            print(f"[POP_WIFI] Target is UP! System ARMED for hit detection.", flush=True)
-                        elif new_state == "DOWN" and g_state.target_state == "UP_ARMED" and not g_state.hit_active:
-                            g_state.target_state = "DOWN"
-                            g_state.recent_bullet_positions.clear()
+                        if new_state == "UP" and g_state.target_state == "IDLE":
+                            g_state.target_state = "SETTLING"
+                            g_state.state_entered_time = time.time()
+                            g_state.baseline_ready = False
+                            g_state.baseline_frames.clear()
+                            g_state.pending_candidate = None
+                            print(f"[POP_WIFI] Target is UP! Settling servo...", flush=True)
+                        elif new_state == "DOWN" and g_state.target_state not in ("IDLE", "LOCKED"):
+                            g_state.target_state = "IDLE"
+                            g_state.pending_candidate = None
             except Exception:
                 with g_state.lock:
                     g_state.wifi_pop_connected = False
@@ -300,110 +281,18 @@ class SerialP4StreamReader:
 # =============================================================================
 # COMPUTER VISION & METRIC ANALYSIS ENGINE
 # =============================================================================
-def segment_yellow_nerf_bullet(frame_bgr: np.ndarray, roi_mask: np.ndarray) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
-    """
-    10/10 Verified Multi-Feature Classifier for Yellow Nerf Dart on Black Target:
-      1. Dark Target Presence (`dark_px_ratio >= 6.0%` where V < 78 inside Optimal Zone):
-         Rejects empty uniform amber/yellow walls (`live_frame_check.png` has 0.0% dark pixels)
-         when the black target is down or absent.
-      2. Lemon-Yellow Foam Body Sub-Mask (`G/R >= 0.73`, `R >= 145`, `G >= 115`, `B <= 45`, `S >= 200`):
-         Captures the bright yellow cylindrical body (`~5,000 px`) while rejecting warm room walls (`G/R ~ 0.69`).
-      3. Vivid-Orange Dart Tip Sub-Mask (`G/R <= 0.64`, `R - G >= 62`, `R >= 165`, `G >= 85`, `B <= 35`, `S >= 215`):
-         Captures the distinct circular orange tip (`~2,300 - 3,200 px`) in the center of the dart head.
-      4. Co-occurrence & Bridged Contour Validation:
-         Requires a single contiguous dart blob (`2,200 - 42,000 px`) containing BOTH
-         `lemon_yellow >= 1,200 px` AND `vivid_orange >= 700 px`.
-    """
-    h_img, w_img = frame_bgr.shape[:2]
-    roi_bool = (roi_mask > 0) if roi_mask is not None else np.ones((h_img, w_img), dtype=bool)
-    roi_total_px = float(np.count_nonzero(roi_bool))
-    if roi_total_px == 0:
-        return np.zeros((h_img, w_img), dtype=np.uint8), []
-
-    b = frame_bgr[:, :, 0].astype(np.float32)
-    g = frame_bgr[:, :, 1].astype(np.float32)
-    r = frame_bgr[:, :, 2].astype(np.float32)
-    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-    s_ch = hsv[:, :, 1]
-    v_ch = hsv[:, :, 2]
-
-    # 1. Verify Black Target / Dark Backing Presence in ROI (V < 78)
-    dark_px_ratio = np.count_nonzero((v_ch < 78) & roi_bool) / roi_total_px
-    if dark_px_ratio < 0.06:
-        # No black target / dark backing in the zone (only flat bright background wall)
-        return np.zeros((h_img, w_img), dtype=np.uint8), []
-
-    # 2. Lemon-Yellow Foam Body Sub-Mask
-    lemon_yellow = (
-        (r >= 145) & (g >= 115) & (b <= 45) &
-        ((g / (r + 1.0)) >= 0.73) &
-        (s_ch >= 200) & roi_bool
-    ).astype(np.uint8)
-
-    # 3. Vivid-Orange Dart Tip Sub-Mask
-    vivid_orange = (
-        (r >= 165) & (g >= 85) & (b <= 35) &
-        ((g / (r + 1.0)) <= 0.64) &
-        ((r - g) >= 62) &
-        (s_ch >= 215) & roi_bool
-    ).astype(np.uint8)
-
-    # 4. Bridged Dart Contour Mask (unites Yellow Foam Ring + Orange Tip Core)
-    bridged = ((lemon_yellow > 0) | (vivid_orange > 0)).astype(np.uint8) * 255
-    close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
-    clean_mask = cv2.morphologyEx(bridged, cv2.MORPH_CLOSE, close_kernel)
-
-    contours, _ = cv2.findContours(clean_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    candidates = []
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area < 2200 or area > 42000:
-            continue
-
-        x, y, w, h_box = cv2.boundingRect(cnt)
-        aspect_ratio = float(w) / float(h_box) if h_box > 0 else 0.0
-        if aspect_ratio < MIN_ASPECT_RATIO or aspect_ratio > MAX_ASPECT_RATIO:
-            continue
-
-        hull = cv2.convexHull(cnt)
-        hull_area = cv2.contourArea(hull)
-        solidity = float(area) / hull_area if hull_area > 0 else 0.0
-        if solidity < 0.50:
-            continue
-
-        # Must contain BOTH Lemon-Yellow Foam body (>= 1200 px) AND Vivid-Orange Tip (>= 700 px)
-        y_px = int(np.count_nonzero(lemon_yellow[y:y+h_box, x:x+w]))
-        o_px = int(np.count_nonzero(vivid_orange[y:y+h_box, x:x+w]))
-        if y_px < 1200 or o_px < 700:
-            continue
-
-        M = cv2.moments(cnt)
-        if M["m00"] > 0:
-            cx = float(M["m10"] / M["m00"])
-            cy = float(M["m01"] / M["m00"])
-        else:
-            cx = float(x + w / 2)
-            cy = float(y + h_box / 2)
-
-        score = min(99.9, (solidity * 45.0) + min(55.0, ((y_px + o_px) / 5000.0) * 55.0))
-
-        candidates.append({
-            "centroid": (cx, cy),
-            "bbox": (x, y, w, h_box),
-            "area": int(area),
-            "yellow_px": y_px,
-            "orange_px": o_px,
-            "aspect_ratio": round(aspect_ratio, 2),
-            "solidity": round(solidity, 2),
-            "confidence": round(score, 1),
-            "contour": cnt
-        })
-
-    return clean_mask, candidates
-
-
 def process_incoming_frame(frame: np.ndarray, frame_id: int):
-    """Executes full metric pipeline on each incoming frame from COM17."""
+    """
+    Executes Deterministic Multi-Check Nerf Projectile Detector on incoming frame:
+      - State Machine: IDLE -> SETTLING (650ms) -> CALIBRATING (capture 6-frame dark baseline) -> ARMED -> LOCKED (3.0s cooldown)
+      - Check 1: Baseline Difference (pixel delta >= 22 on dark target baseline pixels)
+      - Check 2: Orange/Yellow Chromatic Filter (R >= 105, B <= 75, R - B >= 38, R+G >= 2.2*(B+1), G - B >= 10, R >= G - 28)
+      - Check 3: Sudden Temporal Onset Delta (mean delta >= 10.0 vs previous frame)
+      - Check 4: Spatial Coherence (density >= 0.14, w,h >= 4, area >= 20)
+      - Instant Hit Trigger (Score >= 75 & Area >= 32) or 2-frame fast confirmation (Score >= 55)
+      - Immediate Servo Retract: DOWN,1 via Wi-Fi
+    """
+    t_start = time.perf_counter()
     now = time.time()
     h_img, w_img = frame.shape[:2]
     
@@ -415,101 +304,223 @@ def process_incoming_frame(frame: np.ndarray, frame_id: int):
         g_state.frame_id = frame_id
         g_state.current_frame_bgr = frame.copy()
         
-        # Target ROI mask (Circular optimal black target region: Center 400, 400, Radius 280)
-        roi_mask = np.zeros((h_img, w_img), dtype=np.uint8)
-        tc_x, tc_y = g_state.target_center_px
-        cv2.circle(roi_mask, (tc_x, tc_y), g_state.target_radius_px, 255, -1)
-        
-        # Check cooldown timer
-        if g_state.hit_active and (now - g_state.hit_timestamp > POST_HIT_COOLDOWN_SEC):
-            g_state.hit_active = False
-            g_state.target_state = "ARMED"
-            g_state.recent_bullet_positions.clear()
-            print(f"[METRIC] 3.0s Post-hit cooldown elapsed. Re-arming for next shot.", flush=True)
+        # State machine timeouts
+        if g_state.target_state == "LOCKED":
+            if (now - g_state.hit_timestamp) > POST_HIT_COOLDOWN_SEC:
+                g_state.target_state = "IDLE"
+                g_state.hit_active = False
+                g_state.pending_candidate = None
+                print("[STATE] 3.0s Cooldown completed. System reset to IDLE.", flush=True)
 
-    # Segment Yellow Nerf Bullet Candidates
-    clean_mask, candidates = segment_yellow_nerf_bullet(frame, roi_mask)
-    
-    # Annotated Visualization Frame
+        elif g_state.target_state == "SETTLING":
+            if (now - g_state.state_entered_time) >= POP_UP_SETTLE_WINDOW_SEC:
+                g_state.target_state = "CALIBRATING"
+                g_state.state_entered_time = now
+                g_state.baseline_frames.clear()
+                print("[STATE] Target settled. Capturing stationary baseline...", flush=True)
+
+        elif g_state.target_state == "CALIBRATING":
+            g_state.baseline_frames.append(frame.astype(np.float32))
+            if len(g_state.baseline_frames) >= BASELINE_FRAME_COUNT:
+                g_state.baseline_bgr = np.mean(g_state.baseline_frames, axis=0).astype(np.uint8)
+                g_state.baseline_ready = True
+                g_state.target_state = "ARMED"
+                g_state.state_entered_time = now
+                g_state.pending_candidate = None
+                print("[STATE] Dark reference baseline locked! ARMED for Nerf projectile detection.", flush=True)
+
+    # Visualization canvas
     annotated = frame.copy()
-    
-    # Draw Green Target Optimal Zone Circle
     tc_x, tc_y = g_state.target_center_px
     tr = g_state.target_radius_px
+    
+    # Draw Green Target Optimal Zone Circle
     cv2.circle(annotated, (tc_x, tc_y), tr, (44, 255, 85), 2)
     cv2.circle(annotated, (tc_x, tc_y), 5, (44, 255, 85), -1)
-    
-    # Ignore initial servo swing transients during first 1.0s of pop up
-    is_settling = (now - g_state.target_up_timestamp) < POP_UP_SETTLE_WINDOW_SEC
-    
-    if candidates and not is_settling and not g_state.hit_active:
-        # Choose candidate with largest verified mass
-        candidates.sort(key=lambda c: c["area"], reverse=True)
-        primary = candidates[0]
-        cx, cy = primary["centroid"]
+
+    # Circular Optimal Region ROI Mask
+    roi_mask = np.zeros((h_img, w_img), dtype=np.uint8)
+    cv2.circle(roi_mask, (tc_x, tc_y), tr, 255, -1)
+
+    # Run Detection only if ARMED and baseline is ready
+    confirmed_hit = False
+    best_cand = None
+    c1_pass, c2_pass, c3_pass, c4_pass = False, False, False, False
+
+    if g_state.target_state == "ARMED" and g_state.baseline_ready and g_state.baseline_bgr is not None:
+        # Check 1: Baseline Difference on dark pixels
+        b0 = g_state.baseline_bgr[:, :, 0].astype(np.float32)
+        g0 = g_state.baseline_bgr[:, :, 1].astype(np.float32)
+        r0 = g_state.baseline_bgr[:, :, 2].astype(np.float32)
+        dark_target_mask = ((r0 + g0 + b0) / 3.0 <= 110.0) & (roi_mask > 0)
+
+        b_cur = frame[:, :, 0].astype(np.float32)
+        g_cur = frame[:, :, 1].astype(np.float32)
+        r_cur = frame[:, :, 2].astype(np.float32)
         
-        # Temporal Persistence Check: Must be stationary across N consecutive frames
-        g_state.recent_bullet_positions.append((cx, cy, now, primary["area"]))
-        if len(g_state.recent_bullet_positions) > STABILITY_REQUIRED_FRAMES:
-            g_state.recent_bullet_positions.pop(0)
-            
-        if len(g_state.recent_bullet_positions) >= STABILITY_REQUIRED_FRAMES:
-            # Check maximum drift between observations
-            pts = [(p[0], p[1]) for p in g_state.recent_bullet_positions]
-            max_drift = max(np.hypot(pts[i][0] - pts[0][0], pts[i][1] - pts[0][1]) for i in range(len(pts)))
-            
-            if max_drift <= MAX_STATIONARY_DRIFT_PX:
-                # BULLET STUCK VERIFIED!
-                with g_state.lock:
-                    g_state.hit_active = True
-                    g_state.hit_timestamp = now
-                    g_state.hit_x_px = cx
-                    g_state.hit_y_px = cy
-                    g_state.hit_x_norm = cx / float(w_img)
-                    g_state.hit_y_norm = cy / float(h_img)
-                    g_state.hit_bullet_area = primary["area"]
-                    g_state.hit_confidence = primary["confidence"]
-                    g_state.target_state = "HIT"
-                    
-                print(f"\n[METRIC ANALYSIS] >>> GENUINE YELLOW NERF BULLET STUCK ON BLACK TARGET! <<<", flush=True)
-                print(f"       Coordinates : ({cx:.1f}px, {cy:.1f}px)", flush=True)
-                print(f"       Bullet Area : {primary['area']} px (Yellow={primary['yellow_px']}px, OrangeTip={primary['orange_px']}px)", flush=True)
-                print(f"       Confidence  : {primary['confidence']}%\n", flush=True)
-                
-                # EXECUTE IMMEDIATE PHYSICAL DROP ACTION VIA WI-FI TO POP-UP ESP32
-                g_pop_ctrl.drop_target(1)
-    elif not candidates and not g_state.hit_active:
-        g_state.recent_bullet_positions.clear()
+        diff_r = np.abs(r_cur - r0)
+        diff_g = np.abs(g_cur - g0)
+        diff_b = np.abs(b_cur - b0)
+        max_diff = np.maximum(diff_r, np.maximum(diff_g, diff_b))
         
-    # Draw annotations on HUD
-    for cand in candidates:
-        x, y, w, h_box = cand["bbox"]
-        cx, cy = int(cand["centroid"][0]), int(cand["centroid"][1])
-        cv2.rectangle(annotated, (x, y), (x + w, y + h_box), (0, 255, 255), 2)
-        cv2.drawMarker(annotated, (cx, cy), (0, 255, 255), cv2.MARKER_CROSS, 16, 2)
-        cv2.putText(annotated, f"NERF DART {cand['area']}px ({cand['confidence']}%)", (x, max(15, y - 6)),
+        c1_diff_mask = (max_diff >= 22.0) & dark_target_mask
+
+        # Check 2: Orange/Yellow Chromatic Filter
+        c2_color_mask = (
+            (r_cur >= 105.0) &
+            (b_cur <= 75.0) &
+            ((r_cur - b_cur) >= 38.0) &
+            ((r_cur + g_cur) >= 2.2 * (b_cur + 1.0)) &
+            ((g_cur - b_cur) >= 10.0) &
+            (r_cur >= (g_cur - 28.0)) &
+            (roi_mask > 0)
+        )
+
+        # Combined Candidate Pixel Mask
+        cand_mask = (c1_diff_mask & c2_color_mask).astype(np.uint8) * 255
+
+        # Check 3: Sudden Temporal Onset Delta
+        temporal_diff = None
+        if g_state.prev_frame_bgr is not None:
+            prev_b = g_state.prev_frame_bgr[:, :, 0].astype(np.float32)
+            prev_g = g_state.prev_frame_bgr[:, :, 1].astype(np.float32)
+            prev_r = g_state.prev_frame_bgr[:, :, 2].astype(np.float32)
+            temporal_diff = (np.abs(r_cur - prev_r) + np.abs(g_cur - prev_g) + np.abs(b_cur - prev_b)) / 3.0
+
+        # Morphological opening (remove isolated noise pixels)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        cand_mask_clean = cv2.morphologyEx(cand_mask, cv2.MORPH_OPEN, kernel)
+
+        # Find Contours
+        contours, _ = cv2.findContours(cand_mask_clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        valid_candidates = []
+
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < 20:
+                continue
+            x, y, w, h_box = cv2.boundingRect(cnt)
+            if w < 4 or h_box < 4:
+                continue
+            density = float(area) / (w * h_box)
+            if density < 0.14:
+                continue
+
+            # Centroid
+            M = cv2.moments(cnt)
+            cx = float(M["m10"] / M["m00"]) if M["m00"] > 0 else float(x + w / 2)
+            cy = float(M["m01"] / M["m00"]) if M["m00"] > 0 else float(y + h_box / 2)
+
+            # Temporal onset in bounding box
+            mean_onset = 0.0
+            if temporal_diff is not None:
+                roi_onset = temporal_diff[y:y+h_box, x:x+w]
+                if roi_onset.size > 0:
+                    mean_onset = float(np.mean(roi_onset))
+
+            # Check passes
+            cnt_c1 = True
+            cnt_c2 = True
+            cnt_c3 = (mean_onset >= 10.0) or (g_state.prev_frame_bgr is None)
+            cnt_c4 = (density >= 0.14 and w >= 4 and h_box >= 4)
+
+            # Scoring: C1=40, C2=30, C3=15, C4=15
+            score = (40 if cnt_c1 else 0) + (30 if cnt_c2 else 0) + (15 if cnt_c3 else 0) + (15 if cnt_c4 else 0)
+
+            valid_candidates.append({
+                "cx": cx,
+                "cy": cy,
+                "bbox": (x, y, w, h_box),
+                "area": int(area),
+                "density": density,
+                "onset": mean_onset,
+                "score": score,
+                "c1": cnt_c1,
+                "c2": cnt_c2,
+                "c3": cnt_c3,
+                "c4": cnt_c4
+            })
+
+        if valid_candidates:
+            # Sort by score and area
+            valid_candidates.sort(key=lambda c: (c["score"], c["area"]), reverse=True)
+            best_cand = valid_candidates[0]
+            c1_pass = best_cand["c1"]
+            c2_pass = best_cand["c2"]
+            c3_pass = best_cand["c3"]
+            c4_pass = best_cand["c4"]
+
+            # Multi-check decision
+            if best_cand["score"] >= 75 and best_cand["area"] >= 32:
+                # Instant trigger!
+                confirmed_hit = True
+                print(f"[CV HIT] INSTANT HIT: Score={best_cand['score']}, Area={best_cand['area']}px, Onset={best_cand['onset']:.1f}", flush=True)
+            elif best_cand["score"] >= 55:
+                # Borderline event: Check 2-frame consistency
+                if g_state.pending_candidate is not None:
+                    drift = np.hypot(best_cand["cx"] - g_state.pending_candidate["cx"],
+                                     best_cand["cy"] - g_state.pending_candidate["cy"])
+                    if drift <= 20.0:
+                        confirmed_hit = True
+                        print(f"[CV HIT] 2-FRAME CONFIRMED HIT: Score={best_cand['score']}, Area={best_cand['area']}px, Drift={drift:.1f}px", flush=True)
+                    g_state.pending_candidate = None
+                else:
+                    g_state.pending_candidate = best_cand
+            else:
+                g_state.pending_candidate = None
+        else:
+            g_state.pending_candidate = None
+
+        if confirmed_hit and best_cand is not None:
+            with g_state.lock:
+                g_state.hit_active = True
+                g_state.hit_timestamp = now
+                g_state.hit_x_px = best_cand["cx"]
+                g_state.hit_y_px = best_cand["cy"]
+                g_state.hit_x_norm = best_cand["cx"] / float(w_img)
+                g_state.hit_y_norm = best_cand["cy"] / float(h_img)
+                g_state.hit_bullet_area = best_cand["area"]
+                g_state.hit_confidence = float(best_cand["score"])
+                g_state.target_state = "LOCKED"
+
+            # DISPATCH IMMEDIATE PHYSICAL RETRACT (DOWN,1) VIA WI-FI
+            print(f"\n[ACTUATION] >>> NERF HIT CONFIRMED! DISPATCHING DOWN,1 TO POP-UP ESP32 <<<", flush=True)
+            g_pop_ctrl.drop_target(1)
+
+    latency_ms = (time.perf_counter() - t_start) * 1000.0
+
+    # Draw HUD and Annotations
+    if best_cand is not None:
+        bx, by, bw, bh = best_cand["bbox"]
+        cv2.rectangle(annotated, (bx, by), (bx + bw, by + bh), (0, 165, 255), 2)
+        cv2.drawMarker(annotated, (int(best_cand["cx"]), int(best_cand["cy"])), (0, 255, 255), cv2.MARKER_CROSS, 14, 2)
+        cv2.putText(annotated, f"NERF {best_cand['area']}px ({best_cand['score']}%)", (bx, max(18, by - 6)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 255, 255), 2)
 
-    # Draw Bullseye Impact Marker if Hit is Active
-    if g_state.hit_active:
+    if g_state.hit_active or g_state.target_state == "LOCKED":
         hx, hy = int(g_state.hit_x_px), int(g_state.hit_y_px)
-        cv2.circle(annotated, (hx, hy), 26, (0, 255, 0), 3)
+        cv2.circle(annotated, (hx, hy), 28, (0, 255, 0), 3)
         cv2.circle(annotated, (hx, hy), 6, (0, 0, 255), -1)
-        cv2.putText(annotated, f"BULLET STUCK ({g_state.hit_confidence}%)", (hx + 30, hy + 6),
+        cv2.putText(annotated, f"TARGET HIT ({g_state.hit_confidence:.0f}%)", (hx + 30, hy + 6),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)
         
-        # HUD Banner
         cv2.rectangle(annotated, (0, 0), (w_img, 45), (10, 35, 10), -1)
-        cv2.putText(annotated, f"YELLOW BULLET DETECTED // TARGET DROPPED VIA WIFI", 
-                    (20, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (44, 255, 85), 2)
+        cv2.putText(annotated, "NERF HIT CONFIRMED // TARGET DROPPED VIA WIFI", 
+                    (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.68, (44, 255, 85), 2)
     else:
-        # Status header
-        cv2.rectangle(annotated, (0, 0), (w_img, 35), (20, 20, 20), -1)
-        status_text = f"FPS: {g_state.fps:.1f} | CAM: COM17 | WIFI POP: {'ONLINE' if g_state.wifi_pop_connected else 'CONNECTING...'} | STATE: {g_state.target_state}"
-        cv2.putText(annotated, status_text, (15, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (200, 255, 200), 1)
+        cv2.rectangle(annotated, (0, 0), (w_img, 36), (20, 20, 20), -1)
+        status_text = f"FPS: {g_state.fps:.1f} | STATE: {g_state.target_state} | C1:{'+' if c1_pass else '-'} C2:{'+' if c2_pass else '-'} C3:{'+' if c3_pass else '-'} C4:{'+' if c4_pass else '-'} | LATENCY: {latency_ms:.1f}ms"
+        cv2.putText(annotated, status_text, (15, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (200, 255, 200), 1)
 
+    # Update state
     with g_state.lock:
         g_state.annotated_frame_bgr = annotated
+        g_state.prev_frame_bgr = frame.copy()
+        g_state.check1_diff_pass = c1_pass
+        g_state.check2_color_pass = c2_pass
+        g_state.check3_onset_pass = c3_pass
+        g_state.check4_blob_pass = c4_pass
+        g_state.latency_ms = latency_ms
 
 
 # =============================================================================
@@ -556,8 +567,14 @@ if HAS_FASTAPI:
                 "y_norm": round(g_state.hit_y_norm, 3),
                 "dart_pixels": g_state.hit_bullet_area,
                 "confidence": g_state.hit_confidence,
+                "check1_diff": g_state.check1_diff_pass,
+                "check2_color": g_state.check2_color_pass,
+                "check3_onset": g_state.check3_onset_pass,
+                "check4_blob": g_state.check4_blob_pass,
+                "latency_ms": round(g_state.latency_ms, 1),
                 "fps": g_state.fps,
                 "target_state": g_state.target_state,
+                "baseline_ready": g_state.baseline_ready,
                 "com_port": g_state.com_port,
                 "com_connected": g_state.com_connected,
                 "wifi_pop_connected": g_state.wifi_pop_connected,
@@ -568,22 +585,24 @@ if HAS_FASTAPI:
     def arm_target():
         """Lifts target upright via Wi-Fi and prepares CV."""
         with g_state.lock:
-            g_state.target_state = "UP_ARMED"
-            g_state.target_up_timestamp = time.time()
+            g_state.target_state = "SETTLING"
+            g_state.state_entered_time = time.time()
+            g_state.baseline_ready = False
+            g_state.baseline_frames.clear()
+            g_state.pending_candidate = None
             g_state.hit_active = False
-            g_state.recent_bullet_positions.clear()
         g_pop_ctrl.raise_target(1)
-        return {"status": "ARMED", "timestamp": time.time()}
+        return {"status": "SETTLING", "timestamp": time.time()}
 
     @app.api_route("/drop", methods=["GET", "POST"])
     def drop_target():
         """Drops target down via Wi-Fi."""
         with g_state.lock:
-            g_state.target_state = "DOWN"
+            g_state.target_state = "IDLE"
+            g_state.pending_candidate = None
             g_state.hit_active = False
-            g_state.recent_bullet_positions.clear()
         g_pop_ctrl.drop_target(1)
-        return {"status": "DOWN", "timestamp": time.time()}
+        return {"status": "IDLE", "timestamp": time.time()}
 
 
 def run_api_server():
