@@ -1,0 +1,33 @@
+name: Build ESP32-P4 Standalone Firmware
+
+on:
+  push:
+    paths:
+      - 'temp_cam_inspect/**'
+      - '.github/workflows/build_esp32p4.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.3.1
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Build Firmware with ESP-IDF
+        shell: bash
+        working-directory: temp_cam_inspect
+        run: |
+          . $IDF_PATH/export.sh
+          idf.py set-target esp32p4
+          idf.py build
+
+      - name: Upload Standalone Firmware Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32p4-standalone-firmware
+          path: |
+            temp_cam_inspect/build/*.bin
+            temp_cam_inspect/build/bootloader/*.bin
+            temp_cam_inspect/build/partition_table/*.bin
