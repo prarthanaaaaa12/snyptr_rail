@@ -473,6 +473,9 @@
           <button onclick="resetShots()" class="ref-btn" style="padding: 3px 8px; font-size: 9px; font-weight: 800; background-color: #2b4530;">
             🔄 RESET
           </button>
+          <button id="btnAutoStandalone" onclick="toggleAutoStandaloneMode()" class="ref-btn" style="padding: 3px 8px; font-size: 9px; font-weight: 800; background-color: #3b2a59; color: #ffccff; border: 1px solid #c77dff;" title="Autonomous Target Practice: Target pops, waits for shot, drops on hit, and repeats hands-free!">
+            ⚡ AUTO-CYCLE: OFF
+          </button>
           <!-- Camera connection button (visible) -->
           <button id="btnConnectCamSerial" onclick="toggleConnectCameraSerial()" class="ref-btn ref-btn-accent" style="
             padding: 4px 10px;
@@ -1620,6 +1623,36 @@
       }
     }
 
+    let isAutoStandaloneActive = false;
+    let autoStandaloneTimer = null;
+
+    function toggleAutoStandaloneMode() {
+      isAutoStandaloneActive = !isAutoStandaloneActive;
+      const btn = document.getElementById("btnAutoStandalone");
+      if (btn) {
+        if (isAutoStandaloneActive) {
+          btn.innerText = "⚡ AUTO-CYCLE: ACTIVE";
+          btn.style.backgroundColor = "#7209b7";
+          btn.style.color = "#ffffff";
+          btn.style.boxShadow = "0 0 10px #7209b7";
+          logTerm("[STANDALONE] Autonomous Target Practice Loop ENGAGED. Target will pop, wait for shot, drop on hit, and repeat hands-free!");
+          if (elevationState !== 'UP') {
+            handlePopCommand(1, 15.0);
+          }
+        } else {
+          btn.innerText = "⚡ AUTO-CYCLE: OFF";
+          btn.style.backgroundColor = "#3b2a59";
+          btn.style.color = "#ffccff";
+          btn.style.boxShadow = "none";
+          if (autoStandaloneTimer) {
+            clearTimeout(autoStandaloneTimer);
+            autoStandaloneTimer = null;
+          }
+          logTerm("[STANDALONE] Autonomous Target Practice Loop DISENGAGED.");
+        }
+      }
+    }
+
     function handlePopCommand(targetId = 1, duration = 15.0) {
       exposureSeconds = duration;
       elevationState = 'UP';
@@ -1723,6 +1756,17 @@
 
       updateServoButtonUI(targetId, false);
       resetCvStateToIdle();
+
+      // Autonomous Standalone Loop: auto-pop next round after 3.5s reload window
+      if (isAutoStandaloneActive) {
+        if (autoStandaloneTimer) clearTimeout(autoStandaloneTimer);
+        logTerm(`[STANDALONE] Target concealed. Next round auto-pops in 3.5s...`);
+        autoStandaloneTimer = setTimeout(() => {
+          if (isAutoStandaloneActive && elevationState === 'DOWN') {
+            handlePopCommand(targetId, 15.0);
+          }
+        }, 3500);
+      }
     }
 
     function updateServoButtonUI(id, isUp) {
