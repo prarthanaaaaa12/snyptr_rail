@@ -205,7 +205,11 @@ static volatile p4_state_t g_p4_state = P4_STATE_ARMED; // Armed by default for 
 static int64_t g_p4_state_start_us = 0;
 static int64_t g_p4_cooldown_until_us = 0;
 
-#define NERF_GRID_SIZE 130
+#define NERF_GRID_SIZE 164
+#define NERF_GRID_STEP 4
+#define NERF_GRID_START_X 72
+#define NERF_GRID_START_Y 72
+#define NERF_ROI_RADIUS 325
 static uint16_t s_p4_baseline_roi[NERF_GRID_SIZE][NERF_GRID_SIZE] = {0};
 static int s_p4_baseline_samples = 0;
 static int s_p4_confirm_frames = 0;
@@ -236,7 +240,7 @@ static void uart_rx_task(void *arg)
                         g_p4_state_start_us = now;
                         s_p4_baseline_samples = 0;
                         s_p4_confirm_frames = 0;
-                        ESP_LOGI("P4_NERF", "🎯 Received UP/ARM command. Target settling for 650ms...");
+                        ESP_LOGI("P4_NERF", "🎯 Received UP/ARM command. Target settling for 1800ms...");
                     } else if (strstr(text_cmd_buf, "DOWN")) {
                         g_p4_state = P4_STATE_IDLE;
                         ESP_LOGI("P4_NERF", "Received DOWN command. Target idle.");
@@ -652,27 +656,27 @@ static void camera_stream_task(void *arg)
                     }
                 }
 
-                // 2. Target Settle Timer: wait 650ms after UP command to reject servo swing
+                // 2. Target Settle Timer: wait 1800ms after UP command to reject servo swing
                 if (g_p4_state == P4_STATE_SETTLING) {
-                    if (now_us - g_p4_state_start_us >= 650000ULL) {
+                    if (now_us - g_p4_state_start_us >= 1800000ULL) {
                         g_p4_state = P4_STATE_CALIBRATING;
                         s_p4_baseline_samples = 0;
-                        ESP_LOGI("P4_NERF", "Settle complete. Establishing clean black target baseline...");
+                        ESP_LOGI("P4_NERF", "Settle complete. Establishing clean black target baseline (10 frames)...");
                     }
                 }
 
                 // 3. Baseline Acquisition: Multi-frame average of stationary black target ROI
-                if (g_p4_state == P4_STATE_CALIBRATING || s_p4_baseline_samples < 6) {
+                if (g_p4_state == P4_STATE_CALIBRATING || s_p4_baseline_samples < 10) {
                     for (int gy = 0; gy < NERF_GRID_SIZE; gy++) {
-                        int y = 140 + gy * 4;
+                        int y = NERF_GRID_START_Y + gy * NERF_GRID_STEP;
                         int row = y * 800;
                         for (int gx = 0; gx < NERF_GRID_SIZE; gx++) {
-                            int x = 140 + gx * 4;
+                            int x = NERF_GRID_START_X + gx * NERF_GRID_STEP;
                             s_p4_baseline_roi[gy][gx] = pixels[row + x];
                         }
                     }
                     s_p4_baseline_samples++;
-                    if (s_p4_baseline_samples >= 6) {
+                    if (s_p4_baseline_samples >= 10) {
                         g_p4_state = P4_STATE_ARMED;
                         ESP_LOGI("P4_NERF", "🎯 Clean black target baseline established! ARMED for orange/yellow impact.");
                     }
@@ -690,16 +694,16 @@ static void camera_stream_task(void *arg)
                     uint32_t sum_y = 0;
                     int min_x = 800, max_x = 0, min_y = 800, max_y = 0;
 
-                    // Scan optimal circular ROI (Center 400, 400, Radius 260px)
+                    // Scan optimal circular ROI (Center 400, 400, Radius 325px)
                     for (int gy = 0; gy < NERF_GRID_SIZE; gy++) {
-                        int y = 140 + gy * 4;
+                        int y = NERF_GRID_START_Y + gy * NERF_GRID_STEP;
                         int dy = y - 400;
                         int row = y * 800;
 
                         for (int gx = 0; gx < NERF_GRID_SIZE; gx++) {
-                            int x = 140 + gx * 4;
+                            int x = NERF_GRID_START_X + gx * NERF_GRID_STEP;
                             int dx = x - 400;
-                            if (dx * dx + dy * dy > 260 * 260) continue;
+                            if (dx * dx + dy * dy > NERF_ROI_RADIUS * NERF_ROI_RADIUS) continue;
 
                             uint16_t p = pixels[row + x];
                             uint16_t base = s_p4_baseline_roi[gy][gx];
@@ -715,13 +719,14 @@ static void camera_stream_task(void *arg)
 
                             // Check 1: Baseline difference
                             int delta = (abs(r - br) + abs(g - bg) + abs(b - bb)) / 3;
-                            bool base_was_dark = (br <= 110 && bg <= 110 && bb <= 110);
+                            bool base_was_dark = (br <= 88 && bg <= 88 && bb <= 88);
 
                             if (delta >= 22) diff_count++;
 
                             // Check 2: Nerf Orange/Yellow Chromatic Spectrum
-                            bool is_nerf = (r >= 105 && b <= 75 && (r - b) >= 38 && 
-                                            (r + g) >= ((b + 1) * 2) && (g - b) >= 10 && r >= (g - 28));
+                            bool is_yellow = (r >= 140 && g >= 115 && b <= 85 && (r - b) >= 55 && (g - b) >= 40 && (r + g) >= (b + 1) * 2);
+                            bool is_orange = (r >= 145 && b <= 75 && (r - g) >= 20 && (r - b) >= 65 && (r + g) >= (b + 1) * 2);
+                            bool is_nerf = (is_yellow || is_orange);
 
                             // Genuine projectile transition: dark baseline -> bright orange/yellow
                             if (is_nerf && delta >= 18 && base_was_dark) {
