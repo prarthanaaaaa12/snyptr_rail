@@ -594,22 +594,22 @@
                 <line x1="0" y1="135" x2="270" y2="135" stroke="rgba(255,204,0,0.6)" stroke-width="0.8" stroke-dasharray="3 3" />
                 
                 <!-- Entire Black Region - Tactical Green Optimal Zone Reticle -->
-                <circle id="optimalZoneCircle" cx="135" cy="135" r="82" fill="rgba(44, 255, 85, 0.12)" stroke="#2cff55" stroke-width="2.4" />
-                <circle id="optimalZoneRingDashed" cx="135" cy="135" r="82" fill="none" stroke="#2cff55" stroke-width="1.0" stroke-dasharray="4 3" />
+                <circle id="optimalZoneCircle" cx="135" cy="135" r="110" fill="rgba(44, 255, 85, 0.12)" stroke="#2cff55" stroke-width="2.4" />
+                <circle id="optimalZoneRingDashed" cx="135" cy="135" r="110" fill="none" stroke="#2cff55" stroke-width="1.0" stroke-dasharray="4 3" />
                 <circle cx="135" cy="135" r="3.5" fill="#2cff55" />
                 
-                <!-- Optimal Zone Sight Ticks along r=82 border -->
-                <line x1="45" y1="135" x2="57" y2="135" stroke="#2cff55" stroke-width="2.5" />
-                <line x1="213" y1="135" x2="225" y2="135" stroke="#2cff55" stroke-width="2.5" />
-                <line x1="135" y1="45" x2="135" y2="57" stroke="#2cff55" stroke-width="2.5" />
-                <line x1="135" y1="213" x2="135" y2="225" stroke="#2cff55" stroke-width="2.5" />
+                <!-- Optimal Zone Sight Ticks along r=110 border -->
+                <line x1="18" y1="135" x2="32" y2="135" stroke="#2cff55" stroke-width="2.5" />
+                <line x1="238" y1="135" x2="252" y2="135" stroke="#2cff55" stroke-width="2.5" />
+                <line x1="135" y1="18" x2="135" y2="32" stroke="#2cff55" stroke-width="2.5" />
+                <line x1="135" y1="238" x2="135" y2="252" stroke="#2cff55" stroke-width="2.5" />
                 
                 <!-- Optimal Zone Label -->
-                <text id="optimalZoneLabel" x="135" y="42" text-anchor="middle" fill="#2cff55" font-size="7.5" font-family="monospace" font-weight="900" letter-spacing="0.6">OPTIMAL ZONE (BLACK REGION)</text>
+                <text id="optimalZoneLabel" x="135" y="15" text-anchor="middle" fill="#2cff55" font-size="7.5" font-family="monospace" font-weight="900" letter-spacing="0.6">OPTIMAL ZONE (BLACK REGION)</text>
                 
                 <!-- Inner Tactical Sub-Rings -->
-                <circle cx="135" cy="135" r="26" fill="none" stroke="rgba(255,255,255,0.4)" stroke-width="0.8" stroke-dasharray="2 2" />
-                <circle cx="135" cy="135" r="54" fill="none" stroke="rgba(255,255,255,0.3)" stroke-width="0.8" stroke-dasharray="2 2" />
+                <circle cx="135" cy="135" r="37" fill="none" stroke="rgba(255,255,255,0.4)" stroke-width="0.8" stroke-dasharray="2 2" />
+                <circle cx="135" cy="135" r="74" fill="none" stroke="rgba(255,255,255,0.3)" stroke-width="0.8" stroke-dasharray="2 2" />
                 
                 <!-- Corner Framing Brackets -->
                 <path d="M 15 35 L 15 15 L 35 15" fill="none" stroke="#2cff55" stroke-width="2" />
@@ -2271,9 +2271,9 @@
           }
           cvBaselineAccumulator = null;
 
-          // Build dark target face mask within optimal zone (radius 52 px around (80,80))
+          // Build dark target face mask within optimal zone (radius 66 px around (80,80))
           const cx0 = 80, cy0 = 80;
-          const scanRadius = 52;
+          const scanRadius = 66;
           const rSq = scanRadius * scanRadius;
           let darkCount = 0;
           let staticCount = 0;
@@ -2337,7 +2337,7 @@
         }
 
         const cx0 = 80, cy0 = 80;
-        const scanRadius = 52; // Optimal zone within target
+        const scanRadius = 66; // Optimal zone within target (enlarged)
         const rSq = scanRadius * scanRadius;
 
         let diffPxCount = 0;

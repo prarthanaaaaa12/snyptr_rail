@@ -593,23 +593,23 @@
                 <line x1="135" y1="0" x2="135" y2="270" stroke="rgba(255,204,0,0.6)" stroke-width="0.8" stroke-dasharray="3 3" />
                 <line x1="0" y1="135" x2="270" y2="135" stroke="rgba(255,204,0,0.6)" stroke-width="0.8" stroke-dasharray="3 3" />
                 
-                <!-- Full Viewport - Tactical Green Optimal Zone Reticle -->
-                <rect id="optimalZoneCircle" x="4" y="4" width="262" height="262" rx="4" fill="rgba(44, 255, 85, 0.08)" stroke="#2cff55" stroke-width="2.5" />
-                <rect id="optimalZoneRingDashed" x="8" y="8" width="254" height="254" rx="3" fill="none" stroke="#2cff55" stroke-width="1.0" stroke-dasharray="6 4" />
+                <!-- Entire Black Region - Tactical Green Optimal Zone Reticle -->
+                <circle id="optimalZoneCircle" cx="135" cy="135" r="110" fill="rgba(44, 255, 85, 0.12)" stroke="#2cff55" stroke-width="2.4" />
+                <circle id="optimalZoneRingDashed" cx="135" cy="135" r="110" fill="none" stroke="#2cff55" stroke-width="1.0" stroke-dasharray="4 3" />
                 <circle cx="135" cy="135" r="3.5" fill="#2cff55" />
                 
-                <!-- Optimal Zone Sight Ticks -->
-                <line x1="6" y1="135" x2="24" y2="135" stroke="#2cff55" stroke-width="2.5" />
-                <line x1="246" y1="135" x2="264" y2="135" stroke="#2cff55" stroke-width="2.5" />
-                <line x1="135" y1="6" x2="135" y2="24" stroke="#2cff55" stroke-width="2.5" />
-                <line x1="135" y1="246" x2="135" y2="264" stroke="#2cff55" stroke-width="2.5" />
+                <!-- Optimal Zone Sight Ticks along r=110 border -->
+                <line x1="18" y1="135" x2="32" y2="135" stroke="#2cff55" stroke-width="2.5" />
+                <line x1="238" y1="135" x2="252" y2="135" stroke="#2cff55" stroke-width="2.5" />
+                <line x1="135" y1="18" x2="135" y2="32" stroke="#2cff55" stroke-width="2.5" />
+                <line x1="135" y1="238" x2="135" y2="252" stroke="#2cff55" stroke-width="2.5" />
                 
                 <!-- Optimal Zone Label -->
-                <text id="optimalZoneLabel" x="135" y="24" text-anchor="middle" fill="#2cff55" font-size="8" font-family="monospace" font-weight="900" letter-spacing="0.8">OPTIMAL ZONE: ENTIRE CAMERA FEED (100%)</text>
+                <text id="optimalZoneLabel" x="135" y="15" text-anchor="middle" fill="#2cff55" font-size="7.5" font-family="monospace" font-weight="900" letter-spacing="0.6">OPTIMAL ZONE (BLACK REGION)</text>
                 
                 <!-- Inner Tactical Sub-Rings -->
-                <circle cx="135" cy="135" r="26" fill="none" stroke="rgba(255,255,255,0.4)" stroke-width="0.8" stroke-dasharray="2 2" />
-                <circle cx="135" cy="135" r="54" fill="none" stroke="rgba(255,255,255,0.3)" stroke-width="0.8" stroke-dasharray="2 2" />
+                <circle cx="135" cy="135" r="37" fill="none" stroke="rgba(255,255,255,0.4)" stroke-width="0.8" stroke-dasharray="2 2" />
+                <circle cx="135" cy="135" r="74" fill="none" stroke="rgba(255,255,255,0.3)" stroke-width="0.8" stroke-dasharray="2 2" />
                 
                 <!-- Corner Framing Brackets -->
                 <path d="M 15 35 L 15 15 L 35 15" fill="none" stroke="#2cff55" stroke-width="2" />
@@ -2269,27 +2269,38 @@
           }
           cvBaselineAccumulator = null;
 
-          // Build target mask across the entire camera feed (160x160)
+          // Build dark target face mask within optimal zone (radius 66 px around (80,80))
+          const cx0 = 80, cy0 = 80;
+          const scanRadius = 66;
+          const rSq = scanRadius * scanRadius;
           let darkCount = 0;
           let staticCount = 0;
 
-          for (let y = 0; y < 160; y++) {
+          for (let y = cy0 - scanRadius; y <= cy0 + scanRadius; y++) {
+            const dy = y - cy0;
             const rowOffset = y * 160 * 4;
             const maskRowOffset = y * 160;
-            for (let x = 0; x < 160; x++) {
+            for (let x = cx0 - scanRadius; x <= cx0 + scanRadius; x++) {
+              const dx = x - cx0;
+              if (dx * dx + dy * dy > rSq) continue;
               const idx = rowOffset + x * 4;
               const r = cvReferenceBaseline[idx];
               const g = cvReferenceBaseline[idx + 1];
               const b = cvReferenceBaseline[idx + 2];
+              const avgI = (r + g + b) / 3;
+              const maxChan = Math.max(r, g, b);
 
-              // Pre-existing warm spots check (detect any pre-existing yellow/orange objects)
-              const isWarm = (r >= 135 && g >= 110 && b <= 85 && (r - b) >= 45) || (r >= 140 && b <= 75 && (r - g) >= 20);
-              if (isWarm) {
-                staticCount++;
-                cvTargetDarkMask[maskRowOffset + x] = 0;
-              } else {
+              // Black target surface is dark: average <= 88 and max channel <= 98
+              if (avgI <= 88 && maxChan <= 98) {
                 cvTargetDarkMask[maskRowOffset + x] = 1;
                 darkCount++;
+              } else {
+                cvTargetDarkMask[maskRowOffset + x] = 0; // Ambient background / edge outside target
+              }
+
+              // Pre-existing warm spots check
+              if ((r >= 135 && g >= 110 && b <= 85 && (r - b) >= 45) || (r >= 140 && b <= 75 && (r - g) >= 20)) {
+                staticCount++;
               }
             }
           }
@@ -2323,6 +2334,10 @@
           return;
         }
 
+        const cx0 = 80, cy0 = 80;
+        const scanRadius = 66; // Optimal zone within target (enlarged)
+        const rSq = scanRadius * scanRadius;
+
         let diffPxCount = 0;
         let colorPxCount = 0;
         let sumX = 0, sumY = 0;
@@ -2336,10 +2351,13 @@
         const colorMaskImgData = cvColorMaskCtx.createImageData(160, 160);
         const colorMaskData = colorMaskImgData.data;
 
-        for (let y = 0; y < 160; y++) {
+        for (let y = cy0 - scanRadius; y <= cy0 + scanRadius; y++) {
+          const dy = y - cy0;
           const rowOffset = y * 160 * 4;
           const maskRowOffset = y * 160;
-          for (let x = 0; x < 160; x++) {
+          for (let x = cx0 - scanRadius; x <= cx0 + scanRadius; x++) {
+            const dx = x - cx0;
+            if (dx * dx + dy * dy > rSq) continue;
             roiTotalPx++;
 
             const idx = rowOffset + x * 4;
