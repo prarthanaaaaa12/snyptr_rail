@@ -2,9 +2,6 @@ name: Build ESP32-P4 Standalone Firmware
 
 on:
   push:
-    paths:
-      - 'temp_cam_inspect/**'
-      - '.github/workflows/build_esp32p4.yml'
   workflow_dispatch:
 
 jobs:
@@ -19,6 +16,8 @@ jobs:
         shell: bash
         working-directory: temp_cam_inspect
         run: |
+          git config --global --add safe.directory '*'
+          rm -f dependencies.lock
           . $IDF_PATH/export.sh
           idf.py set-target esp32p4
           idf.py build
